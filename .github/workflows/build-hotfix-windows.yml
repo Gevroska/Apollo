@@ -67,13 +67,7 @@ jobs:
           pacman -Q
 
       - name: Configure
-        # Restore the mingw-w64 default used when v0.4.6 was released.
-        # New headers default to Win10 and redeclare HSYNTHETICPOINTERDEVICE,
-        # which v0.4.6 supplies itself. Keep application source unchanged.
-        run: >-
-          cmake -B build -G Ninja -S .
-          -DCMAKE_C_FLAGS=-D_WIN32_WINNT=0x0603
-          -DCMAKE_CXX_FLAGS=-D_WIN32_WINNT=0x0603
+        run: cmake -B build -G Ninja -S .
 
       - name: Compile
         run: ninja -C build
@@ -119,4 +113,4 @@ jobs:
             hotfix-artifacts/Apollo-0.4.6-hotfix.exe \
             hotfix-artifacts/SHA256SUMS.txt \
             --verify-tag --title 'Apollo 0.4.6-hotfix' \
-            --notes 'Apollo v0.4.6 with only the client certificate validation security backport from upstream PR #1496 (CVE-2026-32253 / GHSA-ph75-mgxh-mv57), plus the Windows build workflow. This custom installer is unsigned. SHA256SUMS.txt includes the installer and the build-output sunshine.exe checksums.'
+            --notes 'Apollo v0.4.6 with the exact client certificate validation security backport from upstream PR #1496 (CVE-2026-32253 / GHSA-ph75-mgxh-mv57), the Windows build workflow, and one build compatibility change removing a duplicate Windows handle declaration now supplied by MinGW headers. No dependency or submodule revisions were changed. This custom installer is unsigned. SHA256SUMS.txt includes the installer and the build-output sunshine.exe checksums.'
