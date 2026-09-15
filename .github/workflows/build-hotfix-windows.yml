@@ -1,0 +1,116 @@
+name: Build Windows 0.4.6 hotfix
+
+on:
+  push:
+    branches: [hotfix/v0.4.6-cve-2026-32253]
+    tags: ['v0.4.6-hotfix*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      BUILD_VERSION: 0.4.6-hotfix
+      BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || 'hotfix/v0.4.6-cve-2026-32253' }}
+      COMMIT: ${{ github.sha }}
+      CLONE_URL: https://github.com/Gevroska/Apollo.git
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-doxygen
+            mingw-w64-ucrt-x86_64-graphviz
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nlohmann_json
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Verify security fix and pinned submodules
+        run: |
+          set -euo pipefail
+          test -f src/crypto.cpp
+          if grep -Fq 'X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY' src/crypto.cpp; then
+            echo '::error::Vulnerable certificate validation exception remains'
+            exit 1
+          fi
+          git submodule status --recursive | tee submodules.txt
+          if grep -Eq '^[-+U]' submodules.txt; then
+            echo '::error::A submodule is missing or differs from its pinned revision'
+            exit 1
+          fi
+          pacman -Q
+
+      - name: Configure
+        run: cmake -B build -G Ninja -S .
+
+      - name: Compile
+        run: ninja -C build
+
+      - name: Build NSIS installer
+        run: cpack -G NSIS --config ./build/CPackConfig.cmake
+
+      - name: Collect installer and SHA-256 checksums
+        run: |
+          set -euo pipefail
+          # v0.4.6 packaging/common.cmake sets this directory and basename.
+          test -s build/cpack_artifacts/Apollo.exe
+          test -s build/sunshine.exe
+          mkdir -p hotfix-artifacts
+          cp build/cpack_artifacts/Apollo.exe hotfix-artifacts/Apollo-0.4.6-hotfix.exe
+          (cd hotfix-artifacts && sha256sum Apollo-0.4.6-hotfix.exe) > hotfix-artifacts/SHA256SUMS.txt
+          (cd build && sha256sum sunshine.exe) >> hotfix-artifacts/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-0.4.6-hotfix-windows
+          path: hotfix-artifacts/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v0.4.6-hotfix')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Apollo-0.4.6-hotfix-windows
+          path: hotfix-artifacts
+      - name: Publish hotfix release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            hotfix-artifacts/Apollo-0.4.6-hotfix.exe \
+            hotfix-artifacts/SHA256SUMS.txt \
+            --verify-tag --title 'Apollo 0.4.6-hotfix' \
+            --notes 'Apollo v0.4.6 with only the client certificate validation security backport from upstream PR #1496 (CVE-2026-32253 / GHSA-ph75-mgxh-mv57), plus the Windows build workflow. This custom installer is unsigned. SHA256SUMS.txt includes the installer and the build-output sunshine.exe checksums.'
