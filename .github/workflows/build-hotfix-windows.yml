@@ -67,7 +67,13 @@ jobs:
           pacman -Q
 
       - name: Configure
-        run: cmake -B build -G Ninja -S .
+        # Restore the mingw-w64 default used when v0.4.6 was released.
+        # New headers default to Win10 and redeclare HSYNTHETICPOINTERDEVICE,
+        # which v0.4.6 supplies itself. Keep application source unchanged.
+        run: >-
+          cmake -B build -G Ninja -S .
+          -DCMAKE_C_FLAGS=-D_WIN32_WINNT=0x0603
+          -DCMAKE_CXX_FLAGS=-D_WIN32_WINNT=0x0603
 
       - name: Compile
         run: ninja -C build
