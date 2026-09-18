@@ -27,6 +27,38 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      - name: Restore original v0.4.6 virtual display driver binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # These signed binaries are omitted by the repository's .gitignore.
+          # Recover only the missing files from the hash-pinned original release.
+          $original = Join-Path $env:RUNNER_TEMP 'Apollo-0.4.6.exe'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-original-driver'
+          Invoke-WebRequest 'https://github.com/ClassicOldSong/Apollo/releases/download/v0.4.6/Apollo-0.4.6.exe' -OutFile $original
+          if ((Get-FileHash $original -Algorithm SHA256).Hash -ne '42B2AEFAACB3474511517A56B96EE9F0517F30AC38B5DD2FDA9FD5B478F5021A') {
+            throw 'Original v0.4.6 installer checksum mismatch'
+          }
+          & 7z x $original "-o$extracted" 'drivers/sudovda/*' -y
+          if ($LASTEXITCODE -ne 0) { throw 'Original driver extraction failed' }
+          $source = Join-Path $extracted 'drivers/sudovda'
+          $target = 'src_assets/windows/drivers/sudovda'
+          foreach ($name in @('SudoVDA.inf', 'sudovda.cat', 'sudovda.cer', 'install.bat', 'uninstall.bat')) {
+            if ((Get-FileHash "$source/$name").Hash -ne (Get-FileHash "$target/$name").Hash) {
+              throw "Original driver metadata differs from v0.4.6 source: $name"
+            }
+          }
+          $expected = @{
+            'SudoVDA.dll' = '47EE263CB5DE9382C6630A2D7F3DAFEC4A49419F953BEEC869CA5DD0C460FF63'
+            'nefconc.exe' = '9DBA1F1A9E2B21843C4A0CA6C6FFA9E747250DD6E42C8C14325CA069AD43EA8F'
+          }
+          foreach ($name in $expected.Keys) {
+            if ((Get-FileHash "$source/$name" -Algorithm SHA256).Hash -ne $expected[$name]) {
+              throw "Original driver binary checksum mismatch: $name"
+            }
+            Copy-Item -LiteralPath "$source/$name" -Destination "$target/$name"
+          }
+
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -74,6 +106,19 @@ jobs:
 
       - name: Build NSIS installer
         run: cpack -G NSIS --config ./build/CPackConfig.cmake
+
+      - name: Verify packaged virtual display driver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-packaged-driver'
+          & 7z x build/cpack_artifacts/Apollo.exe "-o$extracted" 'drivers/sudovda/*' -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS driver verification extraction failed' }
+          foreach ($name in @('SudoVDA.dll', 'nefconc.exe', 'SudoVDA.inf', 'sudovda.cat', 'sudovda.cer', 'install.bat', 'uninstall.bat')) {
+            if ((Get-FileHash "$extracted/drivers/sudovda/$name").Hash -ne (Get-FileHash "src_assets/windows/drivers/sudovda/$name").Hash) {
+              throw "Packaged driver file is missing or changed: $name"
+            }
+          }
 
       - name: Collect installer and SHA-256 checksums
         run: |
