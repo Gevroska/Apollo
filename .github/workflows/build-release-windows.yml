@@ -1,0 +1,260 @@
+name: Apollo 0.4.7 Windows validation and release
+
+on:
+  push:
+    branches: [release/0.4.7]
+    tags: ['v0.4.7', 'v0.4.7-beta.*']
+  pull_request:
+    branches: [release/0.4.7]
+  workflow_dispatch:
+    inputs:
+      publish_beta:
+        description: Publish v0.4.7-beta.1 after all validation gates
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      BRANCH: release/0.4.7
+      COMMIT: ${{ github.sha }}
+      CLONE_URL: https://github.com/Gevroska/Apollo.git
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Select version and verify hotfix ancestry
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '0.4.7-beta.1'
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($version -notmatch '^0\.4\.7(?:-beta\.\d+)? v0.4.6 virtual display driver binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # These signed binaries are omitted by the repository's .gitignore.
+          # Recover only the missing files from the hash-pinned original release.
+          $original = Join-Path $env:RUNNER_TEMP 'Apollo-0.4.6.exe'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-original-driver'
+          Invoke-WebRequest 'https://github.com/ClassicOldSong/Apollo/releases/download/v0.4.6/Apollo-0.4.6.exe' -OutFile $original
+          if ((Get-FileHash $original -Algorithm SHA256).Hash -ne '42B2AEFAACB3474511517A56B96EE9F0517F30AC38B5DD2FDA9FD5B478F5021A') {
+            throw 'Original v0.4.6 installer checksum mismatch'
+          }
+          & 7z x $original "-o$extracted" 'drivers/sudovda/*' -y
+          if ($LASTEXITCODE -ne 0) { throw 'Original driver extraction failed' }
+          $source = Join-Path $extracted 'drivers/sudovda'
+          $target = 'src_assets/windows/drivers/sudovda'
+          foreach ($name in @('SudoVDA.inf', 'sudovda.cat', 'sudovda.cer', 'install.bat', 'uninstall.bat')) {
+            if ((Get-FileHash "$source/$name").Hash -ne (Get-FileHash "$target/$name").Hash) {
+              throw "Original driver metadata differs from v0.4.6 source: $name"
+            }
+          }
+          $expected = @{
+            'SudoVDA.dll' = '47EE263CB5DE9382C6630A2D7F3DAFEC4A49419F953BEEC869CA5DD0C460FF63'
+            'nefconc.exe' = '9DBA1F1A9E2B21843C4A0CA6C6FFA9E747250DD6E42C8C14325CA069AD43EA8F'
+          }
+          foreach ($name in $expected.Keys) {
+            if ((Get-FileHash "$source/$name" -Algorithm SHA256).Hash -ne $expected[$name]) {
+              throw "Original driver binary checksum mismatch: $name"
+            }
+            Copy-Item -LiteralPath "$source/$name" -Destination "$target/$name"
+          }
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-doxygen
+            mingw-w64-ucrt-x86_64-graphviz
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-nodejs
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nlohmann_json
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Verify security fix and pinned submodules
+        run: |
+          set -euo pipefail
+          test -f src/crypto.cpp
+          if grep -Fq 'X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY' src/crypto.cpp; then
+            echo '::error::Vulnerable certificate validation exception remains'
+            exit 1
+          fi
+          git submodule status --recursive | tee submodules.txt
+          if grep -Eq '^[-+U]' submodules.txt; then
+            echo '::error::A submodule is missing or differs from its pinned revision'
+            exit 1
+          fi
+          pacman -Q > windows-packages.txt
+          git rev-parse HEAD > build-commit.txt
+          sha256sum package-lock.json > npm-lock.sha256
+
+      - name: Configure test executable
+        run: cmake -B build-tests -G Ninja -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DTEST_COVERAGE=OFF
+
+      - name: Compile test executable
+        run: ninja -C build-tests test_sunshine
+
+      - name: Security protocol regressions and repeated handshakes
+        run: |
+          set -euo pipefail
+          mkdir -p validation
+          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.*:PairingHttp.*' --gtest_repeat=5 --gtest_output=xml:validation/security.xml
+
+      - name: Existing headless regression suite
+        run: |
+          set -euo pipefail
+          # Audio capture and platform HID require the user's devices/interactive session.
+          build-tests/tests/test_sunshine.exe --gtest_filter='-*AudioTest*:*MouseHIDTest*:*VideoTest*' --gtest_output=xml:validation/regression.xml
+
+      - name: Overlay vulnerable source for regression sensitivity check
+        shell: pwsh
+        run: python ci/baseline-regressions.py apply
+
+      - name: Rebuild vulnerable handlers with the same test harness
+        run: ninja -C build-tests test_sunshine
+
+      - name: Require the selected regressions to fail on the hotfix source
+        run: |
+          set -euo pipefail
+          set +e
+          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.PlaintextLaunchCannotBeTakenOver:RtspSecurity.InvalidHighSequenceDoesNotReserveCounter:PairingHttp.InvalidOtpRetainsNoState:PairingHttp.GlobalStateCap' --gtest_output=xml:validation/baseline.xml
+          result=$?
+          set -e
+          test "$result" -eq 1
+          python ci/baseline-regressions.py verify validation/baseline.xml
+
+      - name: Restore patched sources
+        if: always()
+        shell: pwsh
+        run: python ci/baseline-regressions.py restore
+
+      - name: Retain validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-validation-${{ github.run_id }}
+          path: validation/*.xml
+          if-no-files-found: warn
+
+      - name: Configure distribution build without tests or coverage
+        run: cmake -B build -G Ninja -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+
+      - name: Compile distribution build
+        run: ninja -C build
+
+      - name: Build NSIS installer
+        run: cpack -G NSIS --config ./build/CPackConfig.cmake
+
+      - name: Verify packaged virtual display driver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-packaged-driver'
+          & 7z x build/cpack_artifacts/Apollo.exe "-o$extracted" 'drivers/sudovda/*' -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS driver verification extraction failed' }
+          foreach ($name in @('SudoVDA.dll', 'nefconc.exe', 'SudoVDA.inf', 'sudovda.cat', 'sudovda.cer', 'install.bat', 'uninstall.bat')) {
+            if ((Get-FileHash "$extracted/drivers/sudovda/$name").Hash -ne (Get-FileHash "src_assets/windows/drivers/sudovda/$name").Hash) {
+              throw "Packaged driver file is missing or changed: $name"
+            }
+          }
+
+      - name: Verify installed executable version and default-state isolation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-packaged-executable'
+          & 7z x build/cpack_artifacts/Apollo.exe "-o$extracted" 'sunshine.exe' -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS executable extraction failed' }
+          $exe = Join-Path $extracted 'sunshine.exe'
+          $metadata = (Get-Item $exe).VersionInfo
+          if ($metadata.FileMajorPart -ne 0 -or $metadata.FileMinorPart -ne 4 -or $metadata.FileBuildPart -ne 7) {
+            throw 'Installed executable has an incorrect numeric version'
+          }
+          if ($metadata.ProductVersion -notlike "*$env:BUILD_VERSION*") { throw 'Installed product version mismatch' }
+          (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower() + '  sunshine.exe (installed)' | Set-Content installed-executable.sha256
+          if (Test-Path 'config/sunshine_state.json') { throw 'Tests wrote to repository default state' }
+
+      - name: Collect installer and SHA-256 checksums
+        run: |
+          set -euo pipefail
+          # v0.4.6 packaging/common.cmake sets this directory and basename.
+          test -s build/cpack_artifacts/Apollo.exe
+          test -s build/sunshine.exe
+          mkdir -p release-artifacts
+          cp build/cpack_artifacts/Apollo.exe release-artifacts/Apollo-$BUILD_VERSION.exe
+          (cd release-artifacts && sha256sum Apollo-$BUILD_VERSION.exe) > release-artifacts/SHA256SUMS.txt
+          cat installed-executable.sha256 >> release-artifacts/SHA256SUMS.txt
+          cp windows-packages.txt submodules.txt build-commit.txt npm-lock.sha256 release-artifacts/
+          cp -r validation release-artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-${{ steps.version.outputs.version }}-windows
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v0.4.7') || (github.event_name == 'workflow_dispatch' && inputs.publish_beta && github.ref == 'refs/heads/release/0.4.7')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: Apollo-${{ needs.build.outputs.version }}-windows
+          path: release-artifacts
+      - name: Publish validated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if ! gh api "repos/$GH_REPO/git/ref/tags/$tag" > tag.json 2>/dev/null; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" > tag.json
+          fi
+          test "$(python -c 'import json; print(json.load(open("tag.json"))["object"]["sha"])')" = "$GITHUB_SHA"
+          prerelease=()
+          if [[ "$VERSION" == *-beta.* ]]; then prerelease=(--prerelease); fi
+          gh release create "$tag" \
+            "release-artifacts/Apollo-$VERSION.exe" \
+            release-artifacts/SHA256SUMS.txt \
+            release-artifacts/windows-packages.txt \
+            release-artifacts/submodules.txt \
+            release-artifacts/build-commit.txt \
+            release-artifacts/npm-lock.sha256 \
+            --verify-tag --title "Apollo $VERSION" "${prerelease[@]}" \
+            --notes-file docs/release-0.4.7.md

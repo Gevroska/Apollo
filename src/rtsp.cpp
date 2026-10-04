@@ -13,6 +13,7 @@ extern "C" {
 #include <array>
 #include <cctype>
 #include <set>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 
@@ -27,6 +28,9 @@ extern "C" {
 #include "logging.h"
 #include "network.h"
 #include "rtsp.h"
+#ifdef SUNSHINE_TESTS
+#include "protocol_test.h"
+#endif
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
@@ -87,7 +91,7 @@ namespace rtsp_stream {
 
   class socket_t: public std::enable_shared_from_this<socket_t> {
   public:
-    socket_t(boost::asio::io_context &io_context, std::function<void(tcp::socket &sock, launch_session_t &, msg_t &&)> &&handle_data_fn):
+    socket_t(boost::asio::io_context &io_context, std::function<void(tcp::socket &sock, launch_session_t &, msg_t &&, std::optional<uint32_t>)> &&handle_data_fn):
         handle_data_fn {std::move(handle_data_fn)},
         sock {io_context} {
     }
@@ -99,7 +103,7 @@ namespace rtsp_stream {
       if (begin == std::end(msg_buf) || (session->rtsp_cipher && begin + sizeof(encrypted_rtsp_header_t) >= std::end(msg_buf))) {
         BOOST_LOG(error) << "RTSP: read(): Exceeded maximum rtsp packet size: "sv << msg_buf.size();
 
-        respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
+        // No encrypted response is permitted before a message authenticates.
 
         boost::system::error_code ec;
         sock.close(ec);
@@ -144,7 +148,6 @@ namespace rtsp_stream {
       if (ec || bytes < sizeof(encrypted_rtsp_header_t)) {
         BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't read from tcp socket: "sv << ec.message();
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
 
@@ -152,17 +155,15 @@ namespace rtsp_stream {
       if (!header->is_encrypted()) {
         BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Rejecting unencrypted RTSP message"sv;
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
 
       auto payload_length = header->payload_length();
 
       // Check if we have enough space to read this message
-      if (socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
+      if (payload_length >= socket->msg_buf.size() - sizeof(*header)) {
         BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Exceeded maximum rtsp packet size: "sv << socket->msg_buf.size();
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
 
@@ -197,7 +198,6 @@ namespace rtsp_stream {
       if (ec || bytes < payload_length) {
         BOOST_LOG(error) << "RTSP: handle_read_encrypted(): Couldn't read from tcp socket: "sv << ec.message();
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
 
@@ -215,10 +215,10 @@ namespace rtsp_stream {
       iv[11] = 'R';  // RTSP
 
       std::vector<uint8_t> plaintext;
-      if (socket->session->rtsp_cipher->decrypt(std::string_view {(const char *) header->tag, sizeof(header->tag) + bytes}, plaintext, &iv)) {
+      crypto::cipher::gcm_t cipher {socket->session->gcm_key, false};
+      if (cipher.decrypt(std::string_view {(const char *) header->tag, sizeof(header->tag) + bytes}, plaintext, &iv)) {
         BOOST_LOG(error) << "Failed to verify RTSP message tag"sv;
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
 
@@ -226,13 +226,15 @@ namespace rtsp_stream {
       if (auto status = parseRtspMessage(req.get(), (char *) plaintext.data(), plaintext.size())) {
         BOOST_LOG(error) << "Malformed RTSP message: ["sv << status << ']';
 
-        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
-        return;
+        req.reset();
       }
 
+      socket->authenticated_sequence = seq;
       sock_close.disable();
 
-      print_msg(req.get());
+      if (req) {
+        print_msg(req.get());
+      }
 
       socket->handle_data(std::move(req));
     }
@@ -382,10 +384,10 @@ namespace rtsp_stream {
     }
 
     void handle_data(msg_t &&req) {
-      handle_data_fn(sock, *session, std::move(req));
+      handle_data_fn(sock, *session, std::move(req), authenticated_sequence);
     }
 
-    std::function<void(tcp::socket &sock, launch_session_t &, msg_t &&)> handle_data_fn;
+    std::function<void(tcp::socket &sock, launch_session_t &, msg_t &&, std::optional<uint32_t>)> handle_data_fn;
 
     tcp::socket sock;
 
@@ -395,6 +397,7 @@ namespace rtsp_stream {
     char *begin = msg_buf.data();
 
     std::shared_ptr<launch_session_t> session;
+    std::optional<uint32_t> authenticated_sequence;
   };
 
   class rtsp_server_t {
@@ -421,8 +424,8 @@ namespace rtsp_stream {
         return -1;
       }
 
-      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
-        handle_msg(sock, session, std::move(msg));
+      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg, std::optional<uint32_t> sequence) {
+        handle_msg(sock, session, std::move(msg), sequence);
       });
 
       acceptor.async_accept(next_socket->sock, [this](const auto &ec) {
@@ -432,7 +435,29 @@ namespace rtsp_stream {
       return 0;
     }
 
-    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+    void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req, std::optional<uint32_t> sequence) {
+      // Hold the lease through dispatch: clear/expiry cannot revoke it mid-command.
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      auto pending = current_launch();
+      if (!pending || pending.get() != &session || !session.rtsp_cipher || !sequence ||
+          (session.rtsp_received_sequence && *sequence <= *session.rtsp_received_sequence)) {
+        boost::system::error_code ec;
+        sock.close(ec);
+        return;
+      }
+      session.rtsp_received_sequence = sequence;
+      if (!req || req->type != TYPE_REQUEST || !req->message.request.command) {
+        respond(sock, session, nullptr, 400, "BAD REQUEST", 0, {});
+        boost::system::error_code ec;
+        sock.shutdown(boost::asio::socket_base::shutdown_both, ec);
+        return;
+      }
+      if (session.rtsp_announced && std::string_view(req->message.request.command) == "ANNOUNCE") {
+        respond(sock, session, nullptr, 409, "Conflict", req->sequenceNumber, {});
+        boost::system::error_code ec;
+        sock.shutdown(boost::asio::socket_base::shutdown_both, ec);
+        return;
+      }
       auto func = _map_cmd_cb.find(req->message.request.command);
       if (func != std::end(_map_cmd_cb)) {
         func->second(this, sock, session, std::move(req));
@@ -455,8 +480,9 @@ namespace rtsp_stream {
 
       auto socket = std::move(next_socket);
 
-      auto launch_session {launch_event.view(0s)};
-      if (launch_session) {
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      auto launch_session = current_launch();
+      if (launch_session && launch_session->rtsp_cipher) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
         socket->read();
@@ -470,8 +496,8 @@ namespace rtsp_stream {
       }
 
       // Queue another asynchronous accept for the next incoming connection
-      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg) {
-        handle_msg(sock, session, std::move(msg));
+      next_socket = std::make_shared<socket_t>(io_context, [this](tcp::socket &sock, launch_session_t &session, msg_t &&msg, std::optional<uint32_t> sequence) {
+        handle_msg(sock, session, std::move(msg), sequence);
       });
       acceptor.async_accept(next_socket->sock, [this](const auto &ec) {
         handle_accept(ec);
@@ -489,42 +515,31 @@ namespace rtsp_stream {
      * @param launch_session Streaming session information.
      */
     void session_raise(std::shared_ptr<launch_session_t> launch_session) {
-      // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      // Plaintext cannot prove possession of the authenticated launch key.
+      if (!launch_session->rtsp_cipher || current_launch()) {
         return;
       }
-
-      // Raise the new launch session to prepare for the RTSP handshake
+      launch_deadline = std::chrono::steady_clock::now() + config::stream.ping_timeout;
       launch_event.raise(std::move(launch_session));
-
-      // Arm the timer to expire this launch session if the client times out
-      raised_timer.expires_after(config::stream.ping_timeout);
-      raised_timer.async_wait([this](const boost::system::error_code &ec) {
-        if (!ec) {
-          auto discarded = launch_event.pop(0s);
-          if (discarded) {
-            BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
-          }
-        }
-      });
     }
 
-    /**
-     * @brief Clear state for the oldest launch session.
-     * @param launch_session_id The ID of the session to clear.
-     */
     void session_clear(uint32_t launch_session_id) {
-      // We currently only support a single pending RTSP session,
-      // so the ID should always match the one for that session.
-      auto launch_session = launch_event.view(0s);
-      if (launch_session) {
-        if (launch_session->id != launch_session_id) {
-          BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
-        } else {
-          raised_timer.cancel();
-          launch_event.pop();
-        }
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      auto pending = launch_event.view(0s);
+      if (pending && pending->id == launch_session_id) {
+        launch_event.pop(0s);
       }
+    }
+
+    std::shared_ptr<launch_session_t> current_launch() {
+      // Callers hold launch_mutex, including every final command dispatch.
+      auto pending = launch_event.view(0s);
+      if (pending && std::chrono::steady_clock::now() >= launch_deadline) {
+        launch_event.pop(0s);
+        return nullptr;
+      }
+      return pending;
     }
 
     /**
@@ -586,11 +601,9 @@ namespace rtsp_stream {
     void iterate() {
       // If we have a session, we will return to the server loop every
       // 500ms to allow session cleanup to happen.
-      if (session_count() > 0) {
-        io_context.run_one_for(500ms);
-      } else {
-        io_context.run_one();
-      }
+      io_context.run_one_for(500ms);
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      current_launch();
     }
 
     /**
@@ -627,6 +640,11 @@ namespace rtsp_stream {
       return uuids;
     }
 
+#ifdef SUNSHINE_TESTS // Security regression harness methods
+    uint16_t test_port() { return acceptor.local_endpoint().port(); }
+    void test_pump() { io_context.run_for(25ms); }
+#endif // Security regression harness methods
+
   private:
     std::unordered_map<std::string_view, cmd_func_t> _map_cmd_cb;
 
@@ -634,7 +652,8 @@ namespace rtsp_stream {
 
     boost::asio::io_context io_context;
     tcp::acceptor acceptor {io_context};
-    boost::asio::steady_timer raised_timer {io_context};
+    std::recursive_mutex launch_mutex;
+    std::chrono::steady_clock::time_point launch_deadline;
 
     std::shared_ptr<socket_t> next_socket;
   };
@@ -1155,6 +1174,11 @@ namespace rtsp_stream {
       return;
     }
 
+    if (session.rtsp_announced) {
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
+      return;
+    }
+
     auto stream_session = stream::session::alloc(config, session);
     server->insert(stream_session);
 
@@ -1166,6 +1190,7 @@ namespace rtsp_stream {
       return;
     }
 
+    session.rtsp_announced = true;
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
@@ -1266,3 +1291,65 @@ namespace rtsp_stream {
                      << "---End MessageBuffer---"sv << std::endl;
   }
 }  // namespace rtsp_stream
+
+#ifdef SUNSHINE_TESTS // Security regression harness
+namespace rtsp_stream::test {
+  result exchange(std::shared_ptr<launch_session_t> session, const std::vector<std::string> &messages,
+                  retirement retire) {
+    result output {};
+    rtsp_server_t test_server;
+    for (auto command : {"OPTIONS", "DESCRIBE", "SETUP", "ANNOUNCE", "PLAY"}) {
+      test_server.map(command, [&output, command](auto *, auto &socket, auto &launch, auto &&req) {
+        output.commands.emplace_back(command);
+        if (std::string_view(command) == "ANNOUNCE") {
+          launch.rtsp_announced = true;
+        }
+        respond(socket, launch, nullptr, 200, "OK", req->sequenceNumber, {});
+      });
+    }
+    boost::system::error_code ec;
+    if (test_server.bind(net::IPV4, 0, ec)) {
+      throw boost::system::system_error(ec);
+    }
+    auto old_timeout = config::stream.ping_timeout;
+    auto restore_timeout = util::fail_guard([&] { config::stream.ping_timeout = old_timeout; });
+    config::stream.ping_timeout = retire == retirement::expire ? 1ms : 5s;
+    test_server.session_raise(session);
+    for (const auto &message : messages) {
+      asio::io_context client_io;
+      tcp::socket client {client_io};
+      client.connect({asio::ip::address_v4::loopback(), test_server.test_port()});
+      test_server.test_pump(); // Accept and retain the launch before revocation.
+      if (retire == retirement::clear || retire == retirement::replace) {
+        test_server.session_clear(session->id);
+      } else if (retire == retirement::wrong_id) {
+        test_server.session_clear(session->id + 1);
+      } else if (retire == retirement::expire) {
+        std::this_thread::sleep_for(2ms);
+      }
+      if (retire == retirement::replace) {
+        auto replacement = std::make_shared<launch_session_t>();
+        replacement->id = session->id + 1;
+        replacement->gcm_key = crypto::aes_t(16, 0x33);
+        replacement->rtsp_cipher.emplace(replacement->gcm_key, false);
+        test_server.session_raise(replacement);
+      }
+      asio::write(client, asio::buffer(message), ec);
+      client.shutdown(tcp::socket::shutdown_send, ec);
+      test_server.test_pump();
+      client.non_blocking(true);
+      std::string response;
+      std::array<char, 4096> buffer;
+      for (;;) {
+        auto size = client.read_some(asio::buffer(buffer), ec);
+        if (ec) break;
+        response.append(buffer.data(), size);
+      }
+      output.responses.emplace_back(std::move(response));
+    }
+    output.response_counter = session->rtsp_iv_counter;
+    output.pending = !!test_server.launch_event.view(0s);
+    return output;
+  }
+}
+#endif // Security regression harness

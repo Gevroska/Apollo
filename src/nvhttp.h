@@ -125,6 +125,8 @@ namespace nvhttp {
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+    std::string source;
+    std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
   };
 
   /**
