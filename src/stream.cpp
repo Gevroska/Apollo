@@ -30,6 +30,9 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
+#ifdef SUNSHINE_TESTS
+#include "protocol_test.h"
+#endif
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -327,6 +330,9 @@ namespace stream {
     // ENet peer to session mapping for sessions with a peer connected
     sync_util::sync_t<std::map<net::peer_t, session_t *>> _peer_to_session;
 
+#ifdef SUNSHINE_TESTS
+    std::function<void(uint32_t)> test_clear_launch;
+#endif
     ENetAddress _addr;
     net::host_t _host;
   };
@@ -499,6 +505,20 @@ namespace stream {
 
     // Slow path - process new session
     TUPLE_2D(peer_port, peer_addr, platf::from_sockaddr_ex((sockaddr *) &peer->address.address));
+    // Retire the RTSP launch only after releasing control locks. RTSP ANNOUNCE
+    // takes its launch lock before inserting into _sessions.
+    std::optional<uint32_t> launch_to_clear;
+    auto clear_launch = util::fail_guard([&]() {
+      if (launch_to_clear) {
+#ifdef SUNSHINE_TESTS
+        if (test_clear_launch) {
+          test_clear_launch(*launch_to_clear);
+          return;
+        }
+#endif
+        rtsp_stream::launch_session_clear(*launch_to_clear);
+      }
+    });
     auto lg = _sessions.lock();
     for (auto pos = std::begin(*_sessions); pos != std::end(*_sessions); ++pos) {
       auto session_p = *pos;
@@ -525,7 +545,7 @@ namespace stream {
       }
 
       // Once the control stream connection is established, RTSP session state can be torn down
-      rtsp_stream::launch_session_clear(session_p->launch_session_id);
+      launch_to_clear = session_p->launch_session_id;
 
       session_p->control.peer = peer;
 
@@ -2224,3 +2244,50 @@ namespace stream {
     }
   }  // namespace session
 }  // namespace stream
+
+#ifdef SUNSHINE_TESTS
+namespace stream::test {
+  bool control_session_lock_order(bool correct_connect_data) {
+    control_server_t control_server;
+    session_t session {};
+    session.config.mlFeatureFlags = ML_FF_SESSION_ID_V1;
+    session.control.connect_data = 123;
+    session.launch_session_id = 42;
+    control_server._sessions->push_back(&session);
+    ENetPeer peer {};
+    sockaddr_in address {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    std::memcpy(&peer.address.address, &address, sizeof(address));
+    std::memcpy(&peer.localAddress.address, &address, sizeof(address));
+    std::atomic_bool acquired {false};
+    std::thread observer;
+    bool released = false;
+    uint32_t cleared_id = 0;
+    int clear_calls = 0;
+    control_server.test_clear_launch = [&](uint32_t id) {
+      cleared_id = id;
+      ++clear_calls;
+      observer = std::thread([&]() {
+        auto sessions_lock = control_server._sessions.lock();
+        auto peers_lock = control_server._peer_to_session.lock();
+        acquired.store(true);
+      });
+      auto deadline = std::chrono::steady_clock::now() + 1s;
+      while (!acquired.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+      }
+      released = acquired.load();
+    };
+    auto result = control_server.get_session(&peer, correct_connect_data ? 123 : 456);
+    if (observer.joinable()) observer.join();
+    if (!correct_connect_data) {
+      return !result && !session.control.peer && clear_calls == 0;
+    }
+    auto fast_path = control_server.get_session(&peer, 0);
+    return result == &session && fast_path == &session &&
+           session.control.peer == &peer && session.localAddress.is_loopback() &&
+           cleared_id == 42 && clear_calls == 1 && released;
+  }
+}
+#endif

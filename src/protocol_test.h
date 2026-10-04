@@ -21,4 +21,7 @@ namespace nvhttp::test {
   void reset();
   void expire();
 }
+namespace stream::test {
+  bool control_session_lock_order(bool correct_connect_data);
+}
 #endif

@@ -9,3 +9,5 @@ Windows validation gates run real loopback protocol handlers, repeated security 
 The beta is a prerelease for the owner's validation with Artemis Android and Moonlight Windows/Fedora. Audio/video smoothness, hardware encoding, virtual-display operation and input must still be tried on the owner's devices before promotion to v0.4.7. This installer is unsigned. SHA256SUMS.txt identifies the installer and the stripped executable extracted from it. Build commit, submodule revisions and dependency manifests are included.
 
 Stable v0.4.7 publication additionally requires the Windows dependency manifest to match v0.4.7-beta.1 and reuses that beta's verified npm lock. A changed toolchain requires a new beta and revalidation before publication.
+
+The inherited headless suite is also executed against the immutable hotfix. Publication requires all 31 new tests to pass and no new failure among the existing tests. The 31 existing failures in the old mDNS/display expectations are recorded explicitly and must reproduce on both versions; their production source files must remain unchanged. XML reports and the comparison summary are retained.

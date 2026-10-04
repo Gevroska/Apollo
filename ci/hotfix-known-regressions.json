@@ -1,0 +1,41 @@
+{
+  "base": "8d789be463ef72cadb1ba16e202896b11ea7664b",
+  "unchanged_sources": [
+    "src/network.cpp",
+    "src/display_device.cpp"
+  ],
+  "explanation": "Inherited expectations: Sunshine mDNS fallback versus Apollo; display tests use pre-Apollo FPS units and remapping comparisons. Keep every test running and require identical failures on the immutable hotfix and candidate.",
+  "failures": [
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/0",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/10",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/11",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/12",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/13",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/2",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/20",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/21",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/22",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/23",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/24",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/25",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/3",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/32",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/35",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/4",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/44",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/47",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/5",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/57",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/6",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/7",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/8",
+    "DisplayDeviceConfigTest/DisplayModeRemapping.IntegrationTest/9",
+    "DisplayDeviceConfigTest/ParseRefreshRateOption.IntegrationTest/5",
+    "DisplayDeviceConfigTest/ParseRefreshRateOption.IntegrationTest/6",
+    "DisplayDeviceConfigTest/ParseRefreshRateOption.IntegrationTest/7",
+    "DisplayDeviceConfigTest/ParseRefreshRateOption.IntegrationTest/9",
+    "MdnsInstanceNameTests/MdnsInstanceNameTest.Run/3",
+    "MdnsInstanceNameTests/MdnsInstanceNameTest.Run/4",
+    "MdnsInstanceNameTests/MdnsInstanceNameTest.Run/5"
+  ]
+}
