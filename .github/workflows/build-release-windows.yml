@@ -123,6 +123,7 @@ jobs:
           fi
           pacman -Q > windows-packages.txt
           git rev-parse HEAD > build-commit.txt
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           sha256sum package-lock.json > npm-lock.sha256
 
       - name: Configure test executable
@@ -222,6 +223,7 @@ jobs:
           (cd release-artifacts && sha256sum Apollo-$BUILD_VERSION.exe) > release-artifacts/SHA256SUMS.txt
           cat installed-executable.sha256 >> release-artifacts/SHA256SUMS.txt
           cp windows-packages.txt submodules.txt build-commit.txt npm-lock.sha256 release-artifacts/
+          cp package-lock.json release-artifacts/npm-resolved-lock.json
           cp -r validation release-artifacts/
 
       - uses: actions/upload-artifact@v4
