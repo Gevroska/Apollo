@@ -146,13 +146,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p validation
-          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.*:PairingHttp.*' --gtest_repeat=5 --gtest_output=xml:validation/security.xml
+          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.*:PairingHttp.*:StreamControlSecurity.*' --gtest_repeat=5 --gtest_output=xml:validation/security.xml
 
       - name: Existing headless regression suite
         run: |
           set -euo pipefail
           # Audio capture and platform HID require the user's devices/interactive session.
+          set +e
           build-tests/tests/test_sunshine.exe --gtest_filter='-*AudioTest*:*MouseHIDTest*:*EncoderTest*' --gtest_output=xml:validation/regression.xml
+          result=$?
+          set -e
+          test "$result" -le 1
+          test -s validation/regression.xml
 
       - name: Overlay vulnerable source for regression sensitivity check
         shell: pwsh
@@ -171,6 +176,16 @@ jobs:
           test "$result" -eq 1
           python ci/baseline-regressions.py verify validation/baseline.xml
 
+      - name: Compare existing headless regressions with the immutable hotfix
+        run: |
+          set -euo pipefail
+          set +e
+          build-tests/tests/test_sunshine.exe --gtest_filter='-*AudioTest*:*MouseHIDTest*:*EncoderTest*:RtspSecurity.*:PairingHttp.*:LaunchProtocol.*:StreamControlSecurity.*' --gtest_output=xml:validation/hotfix-regression.xml
+          result=$?
+          set -e
+          test "$result" -le 1
+          python ci/compare-regressions.py validation/regression.xml validation/hotfix-regression.xml
+
       - name: Restore patched sources
         if: always()
         shell: pwsh
@@ -181,7 +196,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Apollo-validation-${{ github.run_id }}
-          path: validation/*.xml
+          path: validation/*
           if-no-files-found: warn
 
       - name: Configure distribution build without tests or coverage
