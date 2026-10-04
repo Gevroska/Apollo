@@ -23,6 +23,7 @@ namespace {
       config::sunshine.flags[config::flag::PIN_STDIN] = false;
       server.config.address = "127.0.0.1";
       server.config.port = 0;
+      server.config.thread_pool_size = 4;
       server.config.max_request_streambuf_size = 65536;
       server.resource["^/pair$"]["GET"] = nvhttp::test::pair_http;
       std::promise<unsigned short> ready;
@@ -229,4 +230,14 @@ TEST_F(PairingHttp, SourceRateCacheCannotGrowWithoutBound) {
   EXPECT_EQ(nvhttp::test::pending(), 0);
   EXPECT_NE(read(begin(query("sourceoverflow"), 65)).find("status_code=\"429\""), std::string::npos);
   EXPECT_EQ(nvhttp::test::rate_sources(), 64);
+}
+
+TEST_F(PairingHttp, ConcurrentInvalidOtpAttemptsKeepStateBounded) {
+  std::vector<std::shared_ptr<tcp::socket>> attempts;
+  for (unsigned int i = 0; i < 32; ++i) {
+    attempts.push_back(begin(query("concurrent" + std::to_string(i), "&otpauth=" + std::string(64, '0'))));
+  }
+  for (auto &request : attempts) read(request);
+  EXPECT_EQ(nvhttp::test::pending(), 0);
+  EXPECT_EQ(nvhttp::test::rate_sources(), 1);
 }
