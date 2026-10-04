@@ -1860,7 +1860,7 @@ namespace nvhttp {
   std::string request_otp(const std::string& passphrase, const std::string& deviceName) {
     std::lock_guard<std::recursive_mutex> lock {pairing_mutex};
     if (passphrase.size() < 4 || passphrase.size() > 256 || deviceName.size() > 256) {
-      return "";
+      throw std::invalid_argument("OTP passphrase or device name exceeds permitted bounds");
     }
 
     one_time_pin = crypto::rand_alphabet(4, "0123456789"sv);
