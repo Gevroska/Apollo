@@ -173,6 +173,8 @@ TEST_F(PairingHttp, ExpiryReleasesPendingRequestsWithoutNewTraffic) {
   begin(query("afterexpiry")); wait_pending(1);
 }
 TEST_F(PairingHttp, MalformedAndOversizedFieldsDoNotAllocate) {
+  EXPECT_THROW(nvhttp::request_otp(std::string(257, 'x'), "test"), std::invalid_argument);
+  EXPECT_THROW(nvhttp::request_otp("passphrase", std::string(257, 'x')), std::invalid_argument);
   for (auto query : {"uniqueid=x&phrase=getservercert",
                     "uniqueid=x&uniqueid=y&phrase=getservercert",
                     "uniqueid=x&phrase=getservercert&salt=zz"}) {
