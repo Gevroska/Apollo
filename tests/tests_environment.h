@@ -4,9 +4,11 @@
  */
 #pragma once
 #include "tests_common.h"
+#include <src/config.h>
 
 struct SunshineEnvironment: testing::Environment {
   void SetUp() override {
+    config::sunshine.flags[config::flag::FRESH_STATE] = true;
     mail::man = std::make_shared<safe::mail_raw_t>();
     deinit_log = logging::init(0, "test_sunshine.log");
   }

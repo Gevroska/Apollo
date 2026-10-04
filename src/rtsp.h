@@ -53,7 +53,9 @@ namespace rtsp_stream {
 
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     std::string rtsp_url_scheme;
-    uint32_t rtsp_iv_counter;
+    uint32_t rtsp_iv_counter {};
+    std::optional<uint32_t> rtsp_received_sequence;
+    bool rtsp_announced = false;
 
     std::list<crypto::command_entry_t> client_do_cmds;
     std::list<crypto::command_entry_t> client_undo_cmds;
