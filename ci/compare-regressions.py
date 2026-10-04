@@ -15,12 +15,15 @@ def compare(candidate_path, baseline_path):
     known = json.loads((ROOT / "ci/hotfix-known-regressions.json").read_text())
     candidate, baseline = cases(candidate_path), cases(baseline_path)
     subprocess.run(["git", "diff", "--exit-code", known["base"], "HEAD", "--", *known["unchanged_sources"]], cwd=ROOT, check=True)
-    if len(baseline) != 211 or len(candidate) != 242:
-        raise RuntimeError("Unexpected headless test inventory; baseline must contain 211 existing tests")
+    if len(baseline) != 202 or len(candidate) != 242:
+        raise RuntimeError("Unexpected headless test inventory; baseline must contain 202 unchanged tests")
     additions = {name for name in candidate if name.startswith(("RtspSecurity.", "PairingHttp.", "LaunchProtocol.", "StreamControlSecurity."))}
     if len(additions) != 31 or any(candidate[name].find("skipped") is not None for name in additions):
         raise RuntimeError("Every new protocol/control regression must execute")
-    if set(candidate) - additions != set(baseline):
+    repaired_fixtures = {name for name in candidate if name.startswith("PairingTest.") or "/PairingTest." in name}
+    if len(repaired_fixtures) != 9 or any(candidate[name].find("skipped") is not None for name in repaired_fixtures):
+        raise RuntimeError("All nine existing pairing helper tests must execute")
+    if set(candidate) - additions - repaired_fixtures != set(baseline):
         raise RuntimeError("Existing baseline and candidate test inventories differ")
     if failed(candidate) != failed(baseline) or failed(baseline) != set(known["failures"]):
         raise RuntimeError("New or changed failures detected; compare the XML reports")
