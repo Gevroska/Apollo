@@ -180,7 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          build-tests/tests/test_sunshine.exe --gtest_filter='-*AudioTest*:*MouseHIDTest*:*EncoderTest*:RtspSecurity.*:PairingHttp.*:LaunchProtocol.*:StreamControlSecurity.*' --gtest_output=xml:validation/hotfix-regression.xml
+          build-tests/tests/test_sunshine.exe --gtest_filter='-*AudioTest*:*MouseHIDTest*:*EncoderTest*:RtspSecurity.*:PairingHttp.*:LaunchProtocol.*:StreamControlSecurity.*:*PairingTest*' --gtest_output=xml:validation/hotfix-regression.xml
           result=$?
           set -e
           test "$result" -le 1
