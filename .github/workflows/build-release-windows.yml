@@ -124,7 +124,16 @@ jobs:
           fi
           pacman -Q > windows-packages.txt
           git rev-parse HEAD > build-commit.txt
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          if [[ "$BUILD_VERSION" == "0.4.7" ]]; then
+            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.1"
+            curl --fail --location --silent --show-error "$beta/windows-packages.txt" -o beta-packages.txt
+            diff -u beta-packages.txt windows-packages.txt
+            curl --fail --location --silent --show-error "$beta/npm-resolved-lock.json" -o package-lock.json
+            curl --fail --location --silent --show-error "$beta/npm-lock.sha256" -o beta-npm-lock.sha256
+            sha256sum -c beta-npm-lock.sha256
+          else
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          fi
           sha256sum package-lock.json > npm-lock.sha256
 
       - name: Configure test executable
@@ -216,6 +225,8 @@ jobs:
       - name: Collect installer and SHA-256 checksums
         run: |
           set -euo pipefail
+          git diff --exit-code -- src/nvhttp.cpp src/rtsp.cpp
+          sha256sum -c npm-lock.sha256
           # v0.4.6 packaging/common.cmake sets this directory and basename.
           test -s build/cpack_artifacts/Apollo.exe
           test -s build/sunshine.exe
@@ -268,5 +279,6 @@ jobs:
             release-artifacts/submodules.txt \
             release-artifacts/build-commit.txt \
             release-artifacts/npm-lock.sha256 \
+            release-artifacts/npm-resolved-lock.json \
             --verify-tag --title "Apollo $VERSION" "${prerelease[@]}" \
             --notes-file docs/release-0.4.7.md

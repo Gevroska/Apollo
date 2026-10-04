@@ -7,3 +7,5 @@ Pairing now has a global limit of 32 pending attempts, four per source, a bounde
 Windows validation gates run real loopback protocol handlers, repeated security regressions, existing headless unit tests, and four sensitivity checks against the original vulnerable handlers. The distribution build is separate and contains neither the test harness nor coverage instrumentation. The installer is checked for version 0.4.7 and the original hash-pinned SudoVDA driver files.
 
 The beta is a prerelease for the owner's validation with Artemis Android and Moonlight Windows/Fedora. Audio/video smoothness, hardware encoding, virtual-display operation and input must still be tried on the owner's devices before promotion to v0.4.7. This installer is unsigned. SHA256SUMS.txt identifies the installer and the stripped executable extracted from it. Build commit, submodule revisions and dependency manifests are included.
+
+Stable v0.4.7 publication additionally requires the Windows dependency manifest to match v0.4.7-beta.1 and reuses that beta's verified npm lock. A changed toolchain requires a new beta and revalidation before publication.

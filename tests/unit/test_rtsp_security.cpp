@@ -27,7 +27,8 @@ namespace {
     crypto::cipher::gcm_t cipher(crypto::aes_t(16, key_byte), false);
     auto length = cipher.encrypt(plaintext, reinterpret_cast<uint8_t *>(packet.data() + 8),
                                  reinterpret_cast<uint8_t *>(packet.data() + 24), &iv);
-    EXPECT_EQ(length, plaintext.size() + 16);
+    // The tag is written separately; this API returns the ciphertext length.
+    EXPECT_EQ(length, plaintext.size());
     return packet;
   }
   void rejected(const std::vector<std::string> &packets) {
