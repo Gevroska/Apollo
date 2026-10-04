@@ -1,7 +1,7 @@
 #pragma once
 #ifdef SUNSHINE_TESTS
-#include "rtsp.h"
 #include "nvhttp.h"
+#include "rtsp.h"
 namespace rtsp_stream::test {
   enum class retirement { none, clear, expire, replace, wrong_id };
   struct result {
