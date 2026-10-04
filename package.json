@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@codecov/vite-plugin": "1.9.1",
-    "@vitejs/plugin-vue": "6.0.1",
+    "@vitejs/plugin-vue": "6.0.9",
     "serve": "14.2.5",
     "vite": "6.3.6",
     "vite-plugin-ejs": "1.7.0"
