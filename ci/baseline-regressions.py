@@ -22,8 +22,9 @@ def apply():
     BACKUP.mkdir(parents=True, exist_ok=False)
     for name in ("rtsp.cpp", "nvhttp.cpp"):
         path = ROOT / "src" / name
-        fixed = path.read_text(encoding="utf-8")
-        (BACKUP / name).write_text(fixed, encoding="utf-8")
+        fixed_bytes = path.read_bytes()
+        fixed = fixed_bytes.decode("utf-8").replace("\r\n", "\n")
+        (BACKUP / name).write_bytes(fixed_bytes)
         old = source(f"src/{name}")
         if name == "rtsp.cpp":
             methods = block(fixed, "Security regression harness methods")
@@ -56,7 +57,7 @@ namespace nvhttp::test {
   }
 }
 """
-        path.write_text(old, encoding="utf-8")
+        path.write_bytes(old.encode("utf-8"))
 
 def restore():
     if not BACKUP.exists():
@@ -64,7 +65,7 @@ def restore():
     for name in ("rtsp.cpp", "nvhttp.cpp"):
         saved = BACKUP / name
         if saved.exists():
-            (ROOT / "src" / name).write_text(saved.read_text(encoding="utf-8"), encoding="utf-8")
+            (ROOT / "src" / name).write_bytes(saved.read_bytes())
             saved.unlink()
     BACKUP.rmdir()
 
