@@ -112,6 +112,10 @@ jobs:
       - name: Verify security fix and pinned submodules
         run: |
           set -euo pipefail
+          # Windows checkout uses CRLF; MSYS Git has a different system config.
+          # Share the checkout policy through the disposable repository config.
+          git config --local core.autocrlf true
+          git diff --exit-code -- src/nvhttp.cpp src/rtsp.cpp
           test -f src/crypto.cpp
           if grep -Fq 'X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY' src/crypto.cpp; then
             echo '::error::Vulnerable certificate validation exception remains'
@@ -189,7 +193,11 @@ jobs:
       - name: Restore patched sources
         if: always()
         shell: pwsh
-        run: python ci/baseline-regressions.py restore
+        run: |
+          python ci/baseline-regressions.py restore
+          if ($LASTEXITCODE -ne 0) { throw 'Patched source restoration failed' }
+          git diff --exit-code -- src/nvhttp.cpp src/rtsp.cpp
+          if ($LASTEXITCODE -ne 0) { throw 'Restored sources differ from the candidate' }
 
       - name: Retain validation reports
         if: always()
