@@ -43,7 +43,16 @@ jobs:
           $version = '0.4.7-beta.1'
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $version = $env:GITHUB_REF_NAME.TrimStart('v')
-            if ($version -notmatch '^0\.4\.7(?:-beta\.\d+)? v0.4.6 virtual display driver binaries
+            if ($version -notmatch '^0\.4\.7(?:-beta\.\d+)?$') { throw 'Unexpected release version' }
+          }
+          git merge-base --is-ancestor 8d789be463ef72cadb1ba16e202896b11ea7664b HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Release does not descend from the approved hotfix' }
+          $changed = @(git diff --name-only 8d789be463ef72cadb1ba16e202896b11ea7664b HEAD -- third-party)
+          if ($changed.Count -ne 0) { throw 'Submodule revisions differ from the hotfix base' }
+          "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore original v0.4.6 virtual display driver binaries
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
