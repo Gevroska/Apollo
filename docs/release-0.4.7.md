@@ -1,5 +1,7 @@
 Apollo 0.4.7 is based on the approved Windows hotfix source `8d789be4`, without the unrelated changes on master or changes to pinned submodules.
 
+Beta.2 additionally fixes the Windows unquoted service executable path (CVE-2025-54081 / GHSA-6p7j-5v8v-w45h). The installer persists literal quotes around ApolloService's executable path on both fresh installation and reconfiguration of an existing service. Existing delayed expansion keeps paths containing command metacharacters intact. Windows CI tests the packaged command with temporary services, confirms the registry ImagePath and service configuration, and verifies repair of an existing unquoted path. Dependencies and pinned submodules are unchanged.
+
 This release requires authenticated encrypted RTSP for client streaming launches and resumes. Recent Artemis Android and Moonlight PC clients support this protocol. Legacy clients without encrypted RTSP must be upgraded. Invalid frames cannot alter the legitimate launch's encryption counters; replayed requests and sockets retained after expiry or cancellation cannot start another session.
 
 Pairing now has a global limit of 32 pending attempts, four per source, a bounded rate limiter, strict field bounds, and a 180-second absolute lifetime with periodic cleanup. Invalid OTP requests retain no pending state. PIN and OTP handshakes remain supported.
@@ -8,7 +10,7 @@ Windows validation gates run real loopback protocol handlers, repeated security 
 
 The beta is a prerelease for the owner's validation with Artemis Android and Moonlight Windows/Fedora. Audio/video smoothness, hardware encoding, virtual-display operation and input must still be tried on the owner's devices before promotion to v0.4.7. This installer is unsigned. SHA256SUMS.txt identifies the installer and the stripped executable extracted from it. Build commit, submodule revisions and dependency manifests are included.
 
-Stable v0.4.7 publication additionally requires the Windows dependency manifest to match v0.4.7-beta.1 and reuses that beta's verified npm lock. A changed toolchain requires a new beta and revalidation before publication.
+Stable v0.4.7 publication additionally requires the Windows dependency manifest to match v0.4.7-beta.2 and reuses that beta's verified npm lock. A changed toolchain requires a new beta and revalidation before publication.
 
 The inherited headless suite is also executed against the immutable hotfix. Publication requires all 31 new tests to pass and no new failure among the existing tests. The 31 existing failures in the old mDNS/display expectations are recorded explicitly and must reproduce on both versions; their production source files must remain unchanged. XML reports and the comparison summary are retained.
 

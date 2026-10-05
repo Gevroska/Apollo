@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_beta:
-        description: Publish v0.4.7-beta.1 after all validation gates
+        description: Publish v0.4.7-beta.2 after all validation gates
         type: boolean
         default: false
 
@@ -41,7 +41,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '0.4.7-beta.1'
+          $version = '0.4.7-beta.2'
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $version = $env:GITHUB_REF_NAME.TrimStart('v')
             if ($version -notmatch '^0\.4\.7(?:-beta\.\d+)?$') { throw 'Unexpected release version' }
@@ -134,7 +134,7 @@ jobs:
           pacman -Q > windows-packages.txt
           git rev-parse HEAD > build-commit.txt
           if [[ "$BUILD_VERSION" == "0.4.7" ]]; then
-            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.1"
+            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.2"
             curl --fail --location --silent --show-error "$beta/windows-packages.txt" -o beta-packages.txt
             diff -u beta-packages.txt windows-packages.txt
             curl --fail --location --silent --show-error "$beta/npm-resolved-lock.json" -o package-lock.json
