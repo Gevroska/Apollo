@@ -1,0 +1,45 @@
+name: Prepare reviewed beta.3 security candidate
+on:
+  push:
+    branches: [codex/prepare-beta.3-security]
+    paths: ['.github/workflows/prepare-beta3-security.yml', 'ci/prepare-beta3-security.py']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository == 'Gevroska/Apollo'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply reviewed patch to immutable beta.2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp ci/prepare-beta3-security.py "$RUNNER_TEMP/prepare-beta3-security.py"
+          git checkout --detach a8f6a3cf4b5638342964e28658f22c835aa2282c
+          python "$RUNNER_TEMP/prepare-beta3-security.py"
+          node --test tests/web/pairing-approval.test.mjs
+          git diff --check
+          git diff --stat
+          git grep -n 'nvhttp::pin(' -- src tests
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src src_assets/common/assets/web tests ci/baseline-regressions.py docs/release-0.4.7.md
+          git commit -m 'fix(security): isolate media endpoints and bind PIN approval to request tokens'
+          gh auth setup-git
+          if git ls-remote --exit-code --heads origin codex/security-beta.3 >/dev/null 2>&1; then
+            echo 'Candidate branch already exists; refusing to overwrite it'
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/codex/security-beta.3
+          echo "Candidate commit: $(git rev-parse HEAD)"
+          git diff HEAD^ HEAD > "$RUNNER_TEMP/beta3-security.patch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beta3-security-patch
+          path: ${{ runner.temp }}/beta3-security.patch
+          if-no-files-found: error
