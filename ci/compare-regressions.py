@@ -15,11 +15,23 @@ def compare(candidate_path, baseline_path):
     known = json.loads((ROOT / "ci/hotfix-known-regressions.json").read_text())
     candidate, baseline = cases(candidate_path), cases(baseline_path)
     subprocess.run(["git", "diff", "--exit-code", known["base"], "HEAD", "--", *known["unchanged_sources"]], cwd=ROOT, check=True)
-    if len(baseline) != 202 or len(candidate) != 242:
-        raise RuntimeError("Unexpected headless test inventory; baseline must contain 202 unchanged tests")
+    # beta.3 adds two media-endpoint and five token-approval tests to beta.2.
+    # Keep the immutable 202-test baseline and all nine pairing fixtures intact.
+    if len(baseline) != 202 or len(candidate) != 249:
+        raise RuntimeError(f"Unexpected headless test inventory: {len(baseline)} baseline tests (expected 202), {len(candidate)} candidate tests (expected 249)")
     additions = {name for name in candidate if name.startswith(("RtspSecurity.", "PairingHttp.", "LaunchProtocol.", "StreamControlSecurity."))}
-    if len(additions) != 31 or any(candidate[name].find("skipped") is not None for name in additions):
-        raise RuntimeError("Every new protocol/control regression must execute")
+    beta3_regressions = {
+        "StreamControlSecurity.ModernMediaReceivesKeepPayloadAndSenderTogether",
+        "StreamControlSecurity.LegacyMediaReceivesKeepPayloadAndSenderTogether",
+        "PairingHttp.ApprovalTargetsSelectedRequestNotOldest",
+        "PairingHttp.MissingUnknownAndClientSuppliedTokensCannotApprove",
+        "PairingHttp.ExpiredTokenCannotApproveReusedClientId",
+        "PairingHttp.OlderAttackerRequestsDoNotReceiveLegitimateApproval",
+        "PairingHttp.ConcurrentApprovalConsumesTokenExactlyOnce",
+        "PairingHttp.DisabledPairingRejectsExistingApprovalTokens",
+    }
+    if len(additions) != 38 or not beta3_regressions.issubset(additions) or any(candidate[name].find("skipped") is not None for name in additions):
+        raise RuntimeError("Every new protocol/control regression, including all beta.3 security checks, must execute")
     repaired_fixtures = {name for name in candidate if name.startswith("PairingTest.") or "/PairingTest." in name}
     if len(repaired_fixtures) != 9 or any(candidate[name].find("skipped") is not None for name in repaired_fixtures):
         raise RuntimeError("All nine existing pairing helper tests must execute")
