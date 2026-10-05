@@ -20,6 +20,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <Simple-Web-Server/server_http.hpp>
+#include <openssl/rand.h>
 
 // local includes
 #include "config.h"
@@ -858,6 +859,28 @@ namespace nvhttp {
         reject(429, "Pairing capacity reached; retry later");
         return;
       }
+      if (!valid_otp && !config::sunshine.flags[config::flag::PIN_STDIN]) {
+        std::vector<unsigned char> random_token(32);
+        std::vector<unsigned char> fingerprint(EVP_MAX_MD_SIZE);
+        unsigned int fingerprint_size = 0;
+        auto certificate = crypto::x509(sess->client.cert);
+        if (RAND_bytes(random_token.data(), static_cast<int>(random_token.size())) != 1 ||
+            !certificate || X509_digest(certificate.get(), EVP_sha256(), fingerprint.data(), &fingerprint_size) != 1 ||
+            fingerprint_size != 32) {
+          reject(500, "Unable to create pairing approval");
+          return;
+        }
+        fingerprint.resize(fingerprint_size);
+        sess->approval_token = util::hex_vec(random_token, true);
+        sess->certificate_fingerprint = util::hex_vec(fingerprint, true);
+        // Fail closed even on the cryptographically improbable token collision.
+        if (std::any_of(map_id_sess.begin(), map_id_sess.end(), [&](const auto &entry) {
+              return entry.second->approval_token == sess->approval_token;
+            })) {
+          reject(500, "Unable to create pairing approval");
+          return;
+        }
+      }
       map_id_sess.emplace(uniqID, sess);
 
       if (valid_otp) {
@@ -921,26 +944,57 @@ namespace nvhttp {
     }
   }
 
-  bool pin(std::string pin, std::string name) {
+  static bool awaiting_pin(pair_session_t &sess) {
+    auto &response = sess.async_insert_pin.response;
+    return sess.last_phase == PAIR_PHASE::NONE && sess.approval_token.size() == 64 &&
+      ((response.has_left() && response.left()) || (response.has_right() && response.right()));
+  }
+
+  nlohmann::json pending_pairings() {
+    std::lock_guard<std::recursive_mutex> lock {pairing_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    prune_pairing_sessions(now);
+    auto requests = nlohmann::json::array();
+    if (!config::sunshine.enable_pairing) {
+      return requests;
+    }
+    for (const auto &[id, sess] : map_id_sess) {
+      if (awaiting_pin(*sess)) {
+        requests.push_back({
+          {"token", sess->approval_token},
+          {"name", sess->client.name},
+          {"source", sess->source},
+          {"fingerprint", sess->certificate_fingerprint},
+          {"expires_in", std::chrono::duration_cast<std::chrono::seconds>(PAIR_SESSION_TTL - (now - sess->created)).count()}
+        });
+      }
+    }
+    return requests;
+  }
+
+  bool pin(std::string pin, std::string name, std::string token) {
     std::lock_guard<std::recursive_mutex> lock {pairing_mutex};
     prune_pairing_sessions(std::chrono::steady_clock::now());
-    if (pin.size() != 4 || name.size() > 256 ||
+    if (!config::sunshine.enable_pairing || pin.size() != 4 || name.size() > 256 ||
+        token.size() != 64 || !pairing_hex(token, 64) ||
         !std::all_of(pin.begin(), pin.end(), [](unsigned char c) { return std::isdigit(c); })) {
       return false;
     }
 
     std::shared_ptr<pair_session_t> sess;
     for (const auto &[id, candidate] : map_id_sess) {
-      auto &response = candidate->async_insert_pin.response;
-      if (candidate->last_phase == PAIR_PHASE::NONE &&
-          ((response.has_left() && response.left()) || (response.has_right() && response.right())) &&
-          (!sess || candidate->created < sess->created)) {
+      if (awaiting_pin(*candidate) &&
+          CRYPTO_memcmp(candidate->approval_token.data(), token.data(), token.size()) == 0) {
         sess = candidate;
+        break;
       }
     }
     if (!sess) {
+      // Never fall back to a different request, even if only one remains.
       return false;
     }
+    // Consume under the same lock before starting the handshake or sending data.
+    sess->approval_token.clear();
     pt::ptree tree;
     getservercert(*sess, tree, pin);
     if (tree.get<int>("root.<xmlattr>.status_code") != 200) {

@@ -39,7 +39,7 @@ namespace {
       config::sunshine.enable_pairing = true;
     }
     std::string query(std::string id, std::string suffix = "") {
-      return "uniqueid=" + id + "&phrase=getservercert&devicename=test&clientcert=" +
+      return "uniqueid=" + id + "&phrase=getservercert&devicename=" + id + "&clientcert=" +
         util::hex_vec(PUBLIC_CERT, true) + "&salt=ff5dc6eda99339a8a0793e216c4257c4" + suffix;
     }
     std::shared_ptr<tcp::socket> begin(const std::string &query, unsigned int source = 1) {
@@ -101,6 +101,18 @@ namespace {
       auto phase4 = xml(read(begin("uniqueid=" + id + "&clientpairingsecret=" + util::hex_vec(secret, true))));
       return phase4.get<int>("root.paired") == 1;
     }
+    std::string approval_token(const std::string &id) {
+      for (const auto &request : nvhttp::pending_pairings()) {
+        if (request.at("name") == id) return request.at("token").get<std::string>();
+      }
+      ADD_FAILURE() << "Pending request not found: " << id;
+      return {};
+    }
+    bool approve_single(const std::string &pin, const std::string &name) {
+      auto requests = nvhttp::pending_pairings();
+      if (requests.size() != 1) return false;
+      return nvhttp::pin(pin, name, requests[0].at("token").get<std::string>());
+    }
     void wait_pending(std::size_t count) {
       auto deadline = std::chrono::steady_clock::now() + 2s;
       while (nvhttp::test::pending() != count && std::chrono::steady_clock::now() < deadline)
@@ -130,21 +142,32 @@ TEST_F(PairingHttp, ValidOtpProgressesAndCannotBeReused) {
   auto bad = read(begin("uniqueid=good&clientchallenge=00"));
   EXPECT_NE(bad.find("status_code"), std::string::npos);
 }
-TEST_F(PairingHttp, PinCanBeCorrectedAndAdvancesOldestPendingRequest) {
+TEST_F(PairingHttp, ApprovalTargetsSelectedRequestNotOldest) {
   auto first = begin(query("pin1")); wait_pending(1);
   auto second = begin(query("pin2")); wait_pending(2);
-  EXPECT_FALSE(nvhttp::pin("xx", ""));
-  EXPECT_TRUE(nvhttp::pin("5338", "first"));
+  const auto first_token = approval_token("pin1");
+  const auto second_token = approval_token("pin2");
+  ASSERT_EQ(first_token.size(), 64);
+  ASSERT_EQ(second_token.size(), 64);
+  EXPECT_NE(first_token, second_token);
+  EXPECT_NE(first_token, "pin1");
+  EXPECT_FALSE(nvhttp::pin("xx", "", second_token));
+  ASSERT_TRUE(nvhttp::pin("5338", "second", second_token));
+  const auto body = read(second);
+  EXPECT_NE(body.find("paired>1"), std::string::npos);
+  EXPECT_EQ(body.find(second_token), std::string::npos);
+  EXPECT_FALSE(nvhttp::pin("5338", "", second_token));
+  ASSERT_EQ(nvhttp::pending_pairings().size(), 1);
+  EXPECT_EQ(approval_token("pin1"), first_token);
+  ASSERT_TRUE(nvhttp::pin("5338", "first", first_token));
   EXPECT_NE(read(first).find("paired>1"), std::string::npos);
-  EXPECT_TRUE(nvhttp::pin("5338", "second"));
-  EXPECT_NE(read(second).find("paired>1"), std::string::npos);
-  EXPECT_FALSE(nvhttp::pin("5338", ""));
+  EXPECT_TRUE(nvhttp::pending_pairings().empty());
 }
 TEST_F(PairingHttp, DuplicateIdCannotReplacePendingSaltOrResponse) {
   auto original = begin(query("same")); wait_pending(1);
   EXPECT_NE(read(begin(query("same"))).find("status_code=\"409\""), std::string::npos);
   EXPECT_EQ(nvhttp::test::pending(), 1);
-  ASSERT_TRUE(nvhttp::pin("5338", ""));
+  ASSERT_TRUE(approve_single("5338", ""));
   EXPECT_NE(read(original).find("paired>1"), std::string::npos);
 }
 TEST_F(PairingHttp, SourceQuotaAndRateAreBounded) {
@@ -169,7 +192,7 @@ TEST_F(PairingHttp, ExpiryReleasesPendingRequestsWithoutNewTraffic) {
   nvhttp::test::expire();
   EXPECT_EQ(nvhttp::test::pending(), 0);
   read(client);
-  EXPECT_FALSE(nvhttp::pin("5338", ""));
+  EXPECT_FALSE(approve_single("5338", ""));
   begin(query("afterexpiry")); wait_pending(1);
 }
 TEST_F(PairingHttp, MalformedAndOversizedFieldsDoNotAllocate) {
@@ -193,7 +216,7 @@ TEST_F(PairingHttp, DifferentSourceCannotAdvanceOrErasePendingPair) {
   auto client = begin(query("bound")); wait_pending(1);
   EXPECT_NE(read(begin("uniqueid=bound&clientchallenge=00", 2)).find("status_code=\"400\""), std::string::npos);
   EXPECT_EQ(nvhttp::test::pending(), 1);
-  ASSERT_TRUE(nvhttp::pin("5338", ""));
+  ASSERT_TRUE(approve_single("5338", ""));
   read(client);
   read(begin("uniqueid=bound&clientchallenge=bad"));
   EXPECT_EQ(nvhttp::test::pending(), 0);
@@ -201,7 +224,7 @@ TEST_F(PairingHttp, DifferentSourceCannotAdvanceOrErasePendingPair) {
 
 TEST_F(PairingHttp, CompletePinHandshakeAuthorizesClientAndReleasesState) {
   auto request = begin(query("completepin")); wait_pending(1);
-  ASSERT_TRUE(nvhttp::pin("5338", "complete"));
+  ASSERT_TRUE(approve_single("5338", "complete"));
   EXPECT_NE(read(request).find("paired>1"), std::string::npos);
   ASSERT_TRUE(finish_pair("completepin", "5338"));
   EXPECT_EQ(nvhttp::test::pending(), 0);
@@ -217,7 +240,7 @@ TEST_F(PairingHttp, CompleteOtpHandshakeAuthorizesClientAndReleasesState) {
 }
 TEST_F(PairingHttp, WrongPinHandshakeCannotAuthorizeAndReleasesState) {
   auto request = begin(query("wrongpin")); wait_pending(1);
-  ASSERT_TRUE(nvhttp::pin("5338", ""));
+  ASSERT_TRUE(approve_single("5338", ""));
   read(request);
   EXPECT_FALSE(finish_pair("wrongpin", "1234"));
   EXPECT_EQ(nvhttp::test::pending(), 0);
@@ -242,4 +265,62 @@ TEST_F(PairingHttp, ConcurrentInvalidOtpAttemptsKeepStateBounded) {
   for (auto &request : attempts) read(request);
   EXPECT_EQ(nvhttp::test::pending(), 0);
   EXPECT_EQ(nvhttp::test::rate_sources(), 1);
+}
+
+
+TEST_F(PairingHttp, MissingUnknownAndClientSuppliedTokensCannotApprove) {
+  auto request = begin(query("untrusted-id")); wait_pending(1);
+  auto token = approval_token("untrusted-id");
+  EXPECT_FALSE(nvhttp::pin("5338", "", ""));
+  EXPECT_FALSE(nvhttp::pin("5338", "", "untrusted-id"));
+  EXPECT_FALSE(nvhttp::pin("5338", "", std::string(64, 'z')));
+  auto wrong = token; wrong[0] = wrong[0] == '0' ? '1' : '0';
+  EXPECT_FALSE(nvhttp::pin("5338", "", wrong));
+  ASSERT_EQ(nvhttp::pending_pairings().size(), 1);
+  ASSERT_TRUE(nvhttp::pin("5338", "", token));
+  read(request);
+}
+TEST_F(PairingHttp, ExpiredTokenCannotApproveReusedClientId) {
+  auto old_request = begin(query("reused")); wait_pending(1);
+  auto old_token = approval_token("reused");
+  nvhttp::test::expire(); read(old_request);
+  auto replacement = begin(query("reused")); wait_pending(1);
+  auto new_token = approval_token("reused");
+  EXPECT_NE(old_token, new_token);
+  EXPECT_FALSE(nvhttp::pin("5338", "", old_token));
+  ASSERT_TRUE(nvhttp::pin("5338", "", new_token));
+  read(replacement);
+}
+TEST_F(PairingHttp, OlderAttackerRequestsDoNotReceiveLegitimateApproval) {
+  begin(query("attacker1"), 2); wait_pending(1);
+  begin(query("attacker2"), 2); wait_pending(2);
+  auto legitimate = begin(query("legitimate")); wait_pending(3);
+  const auto token = approval_token("legitimate");
+  ASSERT_TRUE(nvhttp::pin("5338", "legitimate", token));
+  read(legitimate);
+  ASSERT_TRUE(finish_pair("legitimate", "5338"));
+  ASSERT_EQ(nvhttp::get_all_clients().size(), 1);
+  EXPECT_EQ(nvhttp::get_all_clients()[0]["name"], "legitimate");
+  ASSERT_EQ(nvhttp::pending_pairings().size(), 2);
+  EXPECT_FALSE(nvhttp::pin("5338", "", token));
+}
+TEST_F(PairingHttp, ConcurrentApprovalConsumesTokenExactlyOnce) {
+  auto request = begin(query("concurrent-approval")); wait_pending(1);
+  const auto token = approval_token("concurrent-approval");
+  auto first = std::async(std::launch::async, [&] { return nvhttp::pin("5338", "", token); });
+  auto second = std::async(std::launch::async, [&] { return nvhttp::pin("5338", "", token); });
+  const bool a = first.get(), b = second.get();
+  ASSERT_NE(a, b);
+  read(request);
+  ASSERT_TRUE(finish_pair("concurrent-approval", "5338"));
+}
+TEST_F(PairingHttp, DisabledPairingRejectsExistingApprovalTokens) {
+  auto request = begin(query("disabled-existing")); wait_pending(1);
+  const auto token = approval_token("disabled-existing");
+  config::sunshine.enable_pairing = false;
+  EXPECT_TRUE(nvhttp::pending_pairings().empty());
+  EXPECT_FALSE(nvhttp::pin("5338", "", token));
+  config::sunshine.enable_pairing = true;
+  ASSERT_TRUE(nvhttp::pin("5338", "", token));
+  read(request);
 }
