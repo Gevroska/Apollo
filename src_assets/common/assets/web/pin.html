@@ -27,14 +27,7 @@
         <a class="nav-link" :class="{active: currentTab === '#PIN'}" href="#PIN" @click.prevent="switchTab('PIN')">{{ $t('pin.pin_pairing') }}</a>
       </li>
     </ul>
-    <form v-if="currentTab === '#PIN'" class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice">
-      <div class="card flex-column d-flex p-4 mb-4">
-        <input type="text" pattern="\d*" :placeholder="`${$t('navbar.pin')}`" autofocus id="pin-input" class="form-control mt-2" required />
-        <input type="text" :placeholder="`${$t('pin.device_name')}`" id="name-input" class="form-control my-4" />
-        <button class="btn btn-primary">{{ $t('pin.send') }}</button>
-      </div>
-      <div id="status"></div>
-    </form>
+    <PairingApproval v-if="currentTab === '#PIN'" @submitted="pairingSubmitted" />
     <form v-else class="form d-flex flex-column align-items-center" @submit.prevent="requestOTP">
       <div class="card flex-column d-flex p-4 mb-4">
         <div v-show="editingHost || (otp && hostAddr)" id="qrRef"></div>
@@ -213,6 +206,7 @@
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
   import Checkbox from './Checkbox.vue'
+  import PairingApproval from './PairingApproval.vue'
 
   let resetOTPTimeout = null;
   const qrContainer = document.createElement('div');
@@ -382,7 +376,8 @@
   let app = createApp({
     components: {
       Navbar,
-      Checkbox
+      Checkbox,
+      PairingApproval
     },
     inject: ['i18n'],
     data,
@@ -415,37 +410,8 @@
         this.editingHost = false;
         saveHostCache(this, true);
       },
-      registerDevice(e) {
-        let pin = document.querySelector("#pin-input").value;
-        let name = document.querySelector("#name-input").value;
-        document.querySelector("#status").innerHTML = "";
-        let b = JSON.stringify({pin: pin, name: name});
-        fetch("./api/pin", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: b
-        })
-          .then((response) => response.json())
-          .then((response) => {
-            if (response.status === true) {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-success" role="alert">${this.i18n.t('pin.pair_success')}</div>`;
-              document.querySelector("#pin-input").value = "";
-              document.querySelector("#name-input").value = "";
-
-              setTimeout(() => this.refreshClients(), 1000);
-
-              alert(this.i18n.t('pin.pair_success_check_perm'));
-            } else {
-              document.querySelector(
-                "#status"
-              ).innerHTML = `<div class="alert alert-danger" role="alert">${this.i18n.t('pin.pair_failure')}</div>`;
-            }
-          });
+      pairingSubmitted() {
+        setTimeout(() => this.refreshClients(), 1000);
       },
       requestOTP() {
         if (this.editingHost) return;

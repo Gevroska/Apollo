@@ -34,6 +34,10 @@ def apply():
         else:
             old = '#include <mutex>\n#include "protocol_test.h"\n' + old
             old += """
+namespace nvhttp {
+  nlohmann::json pending_pairings() { return nlohmann::json::array(); }
+  bool pin(std::string, std::string, std::string) { return false; }
+}
 namespace nvhttp::test {
   std::recursive_mutex harness_mutex;
   void pair_http(std::shared_ptr<SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response> response,

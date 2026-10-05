@@ -23,5 +23,6 @@ namespace nvhttp::test {
 }
 namespace stream::test {
   bool control_session_lock_order(bool correct_connect_data);
+  bool media_endpoint_isolation(bool legacy);
 }
 #endif

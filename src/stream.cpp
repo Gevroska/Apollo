@@ -1263,7 +1263,8 @@ namespace stream {
 
     auto &io = ctx.io_context;
 
-    udp::endpoint peer;
+    // Never share sender metadata between outstanding audio/video receives.
+    std::array<udp::endpoint, 2> peers;
 
     std::array<char, 2048> buf[2];
     std::function<void(const boost::system::error_code, size_t)> recv_func[2];
@@ -1294,8 +1295,12 @@ namespace stream {
 
     auto recv_func_init = [&](udp::socket &sock, int buf_elem, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
       recv_func[buf_elem] = [&, buf_elem](const boost::system::error_code &ec, size_t bytes) {
+        // Snapshot the sender paired with this buffer before rearming this lane.
+        const auto peer = peers[buf_elem];
         auto fg = util::fail_guard([&]() {
-          sock.async_receive_from(asio::buffer(buf[buf_elem]), peer, 0, recv_func[buf_elem]);
+          if (!broadcast_shutdown_event->peek()) {
+            sock.async_receive_from(asio::buffer(buf[buf_elem]), peers[buf_elem], 0, recv_func[buf_elem]);
+          }
         });
 
         auto type_str = buf_elem ? "AUDIO"sv : "VIDEO"sv;
@@ -1336,13 +1341,82 @@ namespace stream {
     recv_func_init(video_sock, 0, peer_to_video_session);
     recv_func_init(audio_sock, 1, peer_to_audio_session);
 
-    video_sock.async_receive_from(asio::buffer(buf[0]), peer, 0, recv_func[0]);
-    audio_sock.async_receive_from(asio::buffer(buf[1]), peer, 0, recv_func[1]);
+    video_sock.async_receive_from(asio::buffer(buf[0]), peers[0], 0, recv_func[0]);
+    audio_sock.async_receive_from(asio::buffer(buf[1]), peers[1], 0, recv_func[1]);
 
     while (!broadcast_shutdown_event->peek()) {
       io.run();
     }
   }
+
+
+#ifdef SUNSHINE_TESTS
+  namespace test {
+    bool media_endpoint_isolation(bool legacy) {
+      auto shutdown = mail::man->event<bool>(mail::broadcast_shutdown);
+      shutdown->reset();
+      broadcast_ctx_t ctx;
+      ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>();
+      const auto loopback = asio::ip::address_v4::loopback();
+      ctx.video_sock.open(udp::v4());
+      ctx.audio_sock.open(udp::v4());
+      ctx.video_sock.bind({loopback, 0});
+      ctx.audio_sock.bind({loopback, 0});
+      const auto video_destination = ctx.video_sock.local_endpoint();
+      const auto audio_destination = ctx.audio_sock.local_endpoint();
+      auto video_queue = std::make_shared<message_queue_t::element_type>();
+      auto audio_queue = std::make_shared<message_queue_t::element_type>();
+      SS_PING video_ping {};
+      SS_PING audio_ping {};
+      std::fill(std::begin(video_ping.payload), std::end(video_ping.payload), 'v');
+      std::fill(std::begin(audio_ping.payload), std::end(audio_ping.payload), 'a');
+      av_session_id_t video_id = legacy ? av_session_id_t {asio::ip::address {loopback}} :
+        av_session_id_t {std::string {video_ping.payload, sizeof(video_ping.payload)}};
+      av_session_id_t audio_id = legacy ? av_session_id_t {asio::ip::address {loopback}} :
+        av_session_id_t {std::string {audio_ping.payload, sizeof(audio_ping.payload)}};
+      ctx.message_queue_queue->raise(socket_e::video, video_id, video_queue);
+      ctx.message_queue_queue->raise(socket_e::audio, audio_id, audio_queue);
+      const std::string video_data = legacy ? "PING" :
+        std::string {reinterpret_cast<const char *>(&video_ping), sizeof(video_ping)};
+      const std::string audio_data = legacy ? "PING" :
+        std::string {reinterpret_cast<const char *>(&audio_ping), sizeof(audio_ping)};
+      asio::io_context sender_io;
+      udp::socket video_sender(sender_io, udp::endpoint {loopback, 0});
+      udp::socket audio_sender(sender_io, udp::endpoint {loopback, 0});
+      const auto video_source = video_sender.local_endpoint();
+      const auto audio_source = audio_sender.local_endpoint();
+      std::exception_ptr receiver_error;
+      std::thread worker([&] {
+        try { recvThread(ctx); }
+        catch (...) { receiver_error = std::current_exception(); }
+      });
+      auto stop = [&] {
+        // Close on the receiver thread and drain cancellation completions before
+        // destroying the receive buffers/endpoints. Do not stop io prematurely.
+        asio::post(ctx.io_context, [&] {
+          shutdown->raise(true);
+          boost::system::error_code ignored;
+          ctx.video_sock.close(ignored);
+          ctx.audio_sock.close(ignored);
+        });
+        worker.join();
+        shutdown->reset();
+      };
+      auto cleanup = util::fail_guard([&] { if (worker.joinable()) stop(); });
+      bool matched = true;
+      for (int round = 0; round < 64 && matched; ++round) {
+        video_sender.send_to(asio::buffer(video_data), video_destination);
+        audio_sender.send_to(asio::buffer(audio_data), audio_destination);
+        auto video = video_queue->pop(2s);
+        auto audio = audio_queue->pop(2s);
+        matched = video && audio && video->first == video_source &&
+          audio->first == audio_source && video->second == video_data && audio->second == audio_data;
+      }
+      stop();
+      return matched && !receiver_error;
+    }
+  }
+#endif
 
   void videoBroadcastThread(udp::socket &sock) {
     auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);

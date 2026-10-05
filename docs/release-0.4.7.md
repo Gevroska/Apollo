@@ -1,3 +1,25 @@
+## Apollo 0.4.7-beta.3 — targeted network security fixes
+
+- Keep sender endpoints separate for concurrent video/audio UDP receives and snapshot
+  the correct sender with each received packet.
+- Replace implicit oldest-request PIN approval with explicit, administrator-selected
+  requests identified by cryptographically random, single-use 256-bit server tokens.
+  Requests display their observed source IP and SHA-256 certificate fingerprint;
+  requester-provided device names are explicitly untrusted. Expired/replayed/missing
+  tokens fail closed and never approve another pending request.
+- The authenticated management API now requires `token` in `POST /api/pin`;
+  obtain pending approvals via authenticated `GET /api/pairing/requests` (no-store).
+  Update external management scripts using the old two-field PIN API.
+- Existing paired clients, GameStream/Moonlight wire protocol, OTP pairing, codecs,
+  dependency versions and pinned submodules are unchanged. The legacy four-digit PIN
+  exchange has not been redesigned; administrators must verify the selected request.
+- Regression coverage exercises real UDP receives, concurrent/replayed/expired approvals,
+  complete PIN/OTP handshakes and the Web UI's explicit selection behavior. Publication
+  remains gated on the Windows validation/build/installer pipeline. Hardware streaming
+  and interactive installation are not replaced by automated headless tests.
+
+---
+
 Apollo 0.4.7 is based on the approved Windows hotfix source `8d789be4`, without the unrelated changes on master or changes to pinned submodules.
 
 Beta.2 additionally fixes the Windows unquoted service executable path (CVE-2025-54081 / GHSA-6p7j-5v8v-w45h). The installer persists literal quotes around ApolloService's executable path on both fresh installation and reconfiguration of an existing service. Existing delayed expansion keeps paths containing command metacharacters intact. Windows CI tests the packaged command with temporary services, confirms the registry ImagePath and service configuration, and verifies repair of an existing unquoted path. Dependencies and pinned submodules are unchanged.

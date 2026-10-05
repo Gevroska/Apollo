@@ -1269,12 +1269,29 @@ namespace confighttp {
    * @code{.json}
    * {
    *   "pin": "<pin>",
-   *   "name": "Friendly Client Name"
+   *   "name": "Friendly Client Name",
+   *   "token": "<server-generated token from /api/pairing/requests>"
    * }
    * @endcode
    *
-   * @api_examples{/api/pin| POST| {"pin":"1234","name":"My PC"}}
+   * @api_examples{/api/pin| POST| {"pin":"1234","name":"My PC","token":"<request token>"}}
    */
+  void pendingPairings(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+    const nlohmann::json output {{"status", true}, {"requests", nvhttp::pending_pairings()}};
+    const SimpleWeb::CaseInsensitiveMultimap headers {
+      {"Content-Type", "application/json"},
+      {"Cache-Control", "no-store"},
+      {"Pragma", "no-cache"},
+      {"X-Frame-Options", "DENY"},
+      {"Content-Security-Policy", "frame-ancestors 'none';"}
+    };
+    // Device names are untrusted bytes; invalid UTF-8 must not break the API.
+    response->write(output.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), headers);
+  }
+
   void savePin(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
@@ -1289,7 +1306,8 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
-      output_tree["status"] = nvhttp::pin(pin, name);
+      std::string token = input_tree.value("token", "");
+      output_tree["status"] = nvhttp::pin(pin, name, token);
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();
@@ -1531,6 +1549,7 @@ namespace confighttp {
     server.resource["^/troubleshooting/?$"]["GET"] = getTroubleshootingPage;
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/pin$"]["POST"] = savePin;
+    server.resource["^/api/pairing/requests$"]["GET"] = pendingPairings;
     server.resource["^/api/otp$"]["POST"] = getOTP;
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = saveApp;

@@ -127,6 +127,9 @@ namespace nvhttp {
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
     std::string source;
     std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+    // Transient Web UI approval capability: never sent on the GameStream listener.
+    std::string approval_token;
+    std::string certificate_fingerprint;
   };
 
   /**
@@ -187,15 +190,17 @@ namespace nvhttp {
   void clientpairingsecret(pair_session_t &sess, boost::property_tree::ptree &tree, const std::string &client_pairing_secret);
 
   /**
-   * @brief Compare the user supplied pin to the Moonlight pin.
-   * @param pin The user supplied pin.
-   * @param name The user supplied name.
-   * @return `true` if the pin is correct, `false` otherwise.
-   * @examples
-   * bool pin_status = nvhttp::pin("1234", "laptop");
-   * @examples_end
+   * @brief List pending PIN approvals for the authenticated administrator only.
+   * @return Request tokens, untrusted device names, observed IPs and certificate fingerprints.
    */
-  bool pin(std::string pin, std::string name);
+  nlohmann::json pending_pairings();
+
+  /**
+   * @brief Submit a PIN to exactly the pending request selected by the administrator.
+   * @param token The server-generated, single-use approval token, not a client uniqueid.
+   * @return Whether the PIN was submitted. The client must still finish its handshake.
+   */
+  bool pin(std::string pin, std::string name, std::string token);
 
   std::string request_otp(const std::string& passphrase, const std::string& deviceName);
 
