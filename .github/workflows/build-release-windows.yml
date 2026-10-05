@@ -121,6 +121,11 @@ jobs:
             echo '::error::Vulnerable certificate validation exception remains'
             exit 1
           fi
+          service_command='sc %SC_CMD% %SERVICE_NAME% binPath= "\"!SERVICE_BIN!\"" start= %SERVICE_START_TYPE% DisplayName= "Apollo Service"'
+          if [[ "$(tr -d '\r' < src_assets/windows/misc/service/install-service.bat | grep '^sc %SC_CMD% ')" != "$service_command" ]]; then
+            echo '::error::ApolloService executable path must retain literal quotes using delayed expansion'
+            exit 1
+          fi
           git submodule status --recursive | tee submodules.txt
           if grep -Eq '^[-+U]' submodules.txt; then
             echo '::error::A submodule is missing or differs from its pinned revision'
@@ -215,6 +220,67 @@ jobs:
 
       - name: Build NSIS installer
         run: cpack -G NSIS --config ./build/CPackConfig.cmake
+
+      - name: Verify packaged service path on creation and upgrade
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extracted = Join-Path $env:RUNNER_TEMP 'apollo-packaged-service'
+          & 7z x build/cpack_artifacts/Apollo.exe "-o$extracted" 'scripts/install-service.bat' -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS service script extraction failed' }
+          $installer = Join-Path $extracted 'scripts/install-service.bat'
+          if ((Get-FileHash $installer).Hash -ne (Get-FileHash 'src_assets/windows/misc/service/install-service.bat').Hash) {
+            throw 'Packaged service installer differs from the validated source'
+          }
+          $command = @(Get-Content $installer | Where-Object { $_ -match '^sc %SC_CMD% ' })
+          if ($command.Count -ne 1) { throw 'Expected one shared service create/config command' }
+          # Exercise the packaged command without starting a service or running Apollo.
+          foreach ($directory in @('Apollo', 'Apollo Service Path', 'Apollo Service (CI) & Path')) {
+            $serviceName = 'ApolloQuoteTest_' + [guid]::NewGuid().ToString('N')
+            $binary = Join-Path $env:RUNNER_TEMP "$directory\tools\sunshinesvc.exe"
+            $expected = '"' + $binary + '"'
+            $registry = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+            $script = Join-Path $env:RUNNER_TEMP "$serviceName.cmd"
+            try {
+              foreach ($mode in @('create', 'config')) {
+                if ($mode -eq 'config') {
+                  # Reproduce the existing vulnerable ImagePath before repairing it.
+                  & sc.exe config $serviceName binPath= $binary
+                  if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the unquoted upgrade fixture' }
+                  if ((Get-ItemPropertyValue $registry -Name ImagePath) -cne $binary) {
+                    throw 'Upgrade fixture did not reproduce an unquoted ImagePath'
+                  }
+                }
+                @(
+                  '@echo off'
+                  'setlocal enabledelayedexpansion'
+                  "set SC_CMD=$mode"
+                  "set SERVICE_NAME=$serviceName"
+                  ('set "SERVICE_BIN=' + $binary + '"')
+                  'set SERVICE_START_TYPE=demand'
+                  $command[0]
+                ) | Set-Content -LiteralPath $script -Encoding Ascii
+                & $env:ComSpec /d /c $script
+                if ($LASTEXITCODE -ne 0) { throw "Service $mode command failed" }
+                $properties = Get-ItemProperty $registry
+                if ($properties.ImagePath -cne $expected) { throw "$mode did not persist a quoted ImagePath: $($properties.ImagePath)" }
+                if ($properties.Start -ne 3 -or $properties.DisplayName -cne 'Apollo Service' -or $properties.ObjectName -cne 'LocalSystem') {
+                  throw "$mode changed the service's start type, display name, or account"
+                }
+                $configuration = & sc.exe qc $serviceName
+                if ($LASTEXITCODE -ne 0 -or -not ($configuration -join "`n").Contains($expected)) {
+                  throw "$mode did not report a quoted BINARY_PATH_NAME"
+                }
+                Write-Host "$mode verified ImagePath: $($properties.ImagePath)"
+              }
+            } finally {
+              if (Test-Path $registry) {
+                & sc.exe delete $serviceName
+                if ($LASTEXITCODE -ne 0) { throw 'Temporary service cleanup failed' }
+              }
+              if (Test-Path $script) { Remove-Item -LiteralPath $script }
+            }
+          }
 
       - name: Verify packaged virtual display driver
         shell: pwsh
