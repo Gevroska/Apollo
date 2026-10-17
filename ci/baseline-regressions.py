@@ -31,6 +31,15 @@ def apply():
             old = old.replace("  private:\n    std::unordered_map<std::string_view, cmd_func_t>", methods + "\n  private:\n    std::unordered_map<std::string_view, cmd_func_t>")
             old = old.replace('#include "rtsp.h"', '#include "rtsp.h"\n#include "protocol_test.h"')
             old += "\n" + block(fixed, "Security regression harness")
+            # Beta.4 lifecycle tests are candidate-only; the immutable handlers
+            # lack these hooks. Keep the full test executable linkable.
+            old += """
+namespace rtsp_stream::test {
+  bool stalled_sockets_close(bool, bool) { return false; }
+  bool socket_capacity_recovers() { return false; }
+  bool control_retirement_does_not_block_cleanup() { return false; }
+}
+"""
         else:
             old = '#include <mutex>\n#include "protocol_test.h"\n' + old
             old += """

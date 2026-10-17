@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal disabledelayedexpansion
 
 rem Get sunshine root directory
 for %%I in ("%~dp0\..") do set "ROOT_DIR=%%~fI"
@@ -8,6 +8,9 @@ set SERVICE_NAME=ApolloService
 set "SERVICE_BIN=%ROOT_DIR%\tools\sunshinesvc.exe"
 set "SERVICE_CONFIG_DIR=%LOCALAPPDATA%\SudoMaker\Apollo"
 set "SERVICE_CONFIG_FILE=%SERVICE_CONFIG_DIR%\service_start_type.txt"
+
+rem Capture paths before enabling delayed expansion so literal ! characters survive.
+setlocal enabledelayedexpansion
 
 rem Set service to demand start. It will be changed to auto later if the user selected that option.
 set SERVICE_START_TYPE=demand
@@ -30,12 +33,12 @@ if %ERRORLEVEL%==0 (
 )
 
 rem Check if we have a saved start type from previous installation
-if exist "%SERVICE_CONFIG_FILE%" (
+if exist "!SERVICE_CONFIG_FILE!" (
     rem Debug output file content
-    type "%SERVICE_CONFIG_FILE%"
+    type "!SERVICE_CONFIG_FILE!"
 
     rem Read the saved start type
-    for /f "usebackq delims=" %%a in ("%SERVICE_CONFIG_FILE%") do (
+    for /f "usebackq delims=" %%a in ("!SERVICE_CONFIG_FILE!") do (
         set "SAVED_START_TYPE=%%a"
     )
 
@@ -52,7 +55,7 @@ if exist "%SERVICE_CONFIG_FILE%" (
         set SERVICE_START_TYPE=disabled
     )
 
-    del "%SERVICE_CONFIG_FILE%"
+    del "!SERVICE_CONFIG_FILE!"
 )
 
 echo Setting service start type set to: [!SERVICE_START_TYPE!]

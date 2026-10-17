@@ -162,8 +162,8 @@ INSTANTIATE_TEST_SUITE_P(
                       .server_challenge_resp = {},
                       .client_pairing_secret = util::from_hex_vec("000102030405060708090A0B0C0D0EFFxDEADBEEF", true),
                     },
-                    // Only phase 4 will fail, when we check what has been exchanged
-                    pairing_output {true, true, true, false}),
+                    // Reject an empty challenge before advancing the handshake.
+                    pairing_output {true, false}),
     // Testing that when passing some empty values we aren't triggering any exception
     std::make_tuple(pairing_input {
                       .session = std::make_shared<pair_session_t>(pair_session_t {.client = {.cert = PUBLIC_CERT}, .async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}}),
@@ -173,8 +173,8 @@ INSTANTIATE_TEST_SUITE_P(
                       .server_challenge_resp = {},
                       .client_pairing_secret = util::from_hex_vec("000102030405060708090A0B0C0D0EFFxDEADBEEF", true),
                     },
-                    // Only phase 4 will fail, when we check what has been exchanged
-                    pairing_output {true, true, true, false})
+                    // Reject an empty challenge before advancing the handshake.
+                    pairing_output {true, false})
   )
 );
 
@@ -214,7 +214,7 @@ INSTANTIATE_TEST_SUITE_P(
                                    .client_pairing_secret = util::from_hex_vec("000102030405060708090A0B0C0D0EFF"  // secret
                                                                                "9BB74D8DE2FF006C3F47FC45EFDAA97D433783AFAB3ACD85CA7ED2330BB2A7BD18A5B044AF8CAC177116FAE8A6E8E44653A8944A0F8EA138B2E013756D847D2C4FC52F736E2E7E9B4154712B18F8307B2A161E010F0587744163E42ECA9EA548FC435756EDCF1FEB94037631ABB72B29DDAC0EA5E61F2DBFCC3B20AA021473CC85AC98D88052CA6618ED1701EFBF142C18D5E779A3155B84DF65057D4823EC194E6DF14006793E8D7A3DCCE20A911636C4E01ECA8B54B9DE9F256F15DE9A980EA024B30D77579140D45EC220C738164BDEEEBF7364AE94A5FF9B784B40F2E640CE8603017DEEAC7B2AD77B807C643B7B349C110FE15F94C7B3D37FF15FDFBE26",
                                                                                true)},
-                    pairing_output {true, true, true, false}),
+                    pairing_output {true, true, false}),
     /**
      * Wrong signature
      */
@@ -228,9 +228,9 @@ INSTANTIATE_TEST_SUITE_P(
      */
     std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>()}, pairing_output {false}),
     /**
-     * null values (phase 4, phase 2 and 3 have no reason to fail since we are running them in order)
+     * Null challenge values fail at phase 2.
      */
-    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>(pair_session_t {.async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}})}, pairing_output {true, true, true, false})
+    std::make_tuple(pairing_input {.session = std::make_shared<pair_session_t>(pair_session_t {.async_insert_pin = {.salt = "ff5dc6eda99339a8a0793e216c4257c4"}})}, pairing_output {true, false})
   )
 );
 

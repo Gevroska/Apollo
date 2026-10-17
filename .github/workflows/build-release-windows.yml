@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       publish_beta:
-        description: Publish v0.4.7-beta.3 after all validation gates
+        description: Publish v0.4.7-beta.4 after all validation gates
         type: boolean
         default: false
 
@@ -41,7 +41,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '0.4.7-beta.3'
+          $version = '0.4.7-beta.4'
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $version = $env:GITHUB_REF_NAME.TrimStart('v')
             if ($version -notmatch '^0\.4\.7(?:-beta\.\d+)?$') { throw 'Unexpected release version' }
@@ -134,16 +134,24 @@ jobs:
           pacman -Q > windows-packages.txt
           git rev-parse HEAD > build-commit.txt
           if [[ "$BUILD_VERSION" == "0.4.7" ]]; then
-            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.3"
+            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.4"
             curl --fail --location --silent --show-error "$beta/windows-packages.txt" -o beta-packages.txt
             diff -u beta-packages.txt windows-packages.txt
-            curl --fail --location --silent --show-error "$beta/npm-resolved-lock.json" -o package-lock.json
-            curl --fail --location --silent --show-error "$beta/npm-lock.sha256" -o beta-npm-lock.sha256
-            sha256sum -c beta-npm-lock.sha256
           else
-            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+            # This corrective beta keeps beta.3's resolved JavaScript graph.
+            # MSYS2 toolchain changes are recorded in the new package manifest.
+            beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.3"
           fi
+          curl --fail --location --silent --show-error "$beta/npm-resolved-lock.json" -o package-lock.json
+          curl --fail --location --silent --show-error "$beta/npm-lock.sha256" -o beta-npm-lock.sha256
+          sha256sum -c beta-npm-lock.sha256
           sha256sum package-lock.json > npm-lock.sha256
+
+      - name: Regression gate self-tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s ci -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw 'Regression gate self-tests failed' }
 
       - name: Pairing approval Web UI regressions
         run: node --test tests/web/pairing-approval.test.mjs
@@ -158,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p validation
-          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.*:PairingHttp.*:StreamControlSecurity.*' --gtest_repeat=5 --gtest_output=xml:validation/security.xml
+          build-tests/tests/test_sunshine.exe --gtest_filter='RtspSecurity.*:PairingHttp.*:LaunchProtocol.*:StreamControlSecurity.*' --gtest_repeat=5 --gtest_output=xml:validation/security.xml
 
       - name: Existing headless regression suite
         run: |
@@ -235,55 +243,7 @@ jobs:
           if ((Get-FileHash $installer).Hash -ne (Get-FileHash 'src_assets/windows/misc/service/install-service.bat').Hash) {
             throw 'Packaged service installer differs from the validated source'
           }
-          $command = @(Get-Content $installer | Where-Object { $_ -match '^sc %SC_CMD% ' })
-          if ($command.Count -ne 1) { throw 'Expected one shared service create/config command' }
-          # Exercise the packaged command without starting a service or running Apollo.
-          foreach ($directory in @('Apollo', 'Apollo Service Path', 'Apollo Service (CI) & Path')) {
-            $serviceName = 'ApolloQuoteTest_' + [guid]::NewGuid().ToString('N')
-            $binary = Join-Path $env:RUNNER_TEMP "$directory\tools\sunshinesvc.exe"
-            $expected = '"' + $binary + '"'
-            $registry = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-            $script = Join-Path $env:RUNNER_TEMP "$serviceName.cmd"
-            try {
-              foreach ($mode in @('create', 'config')) {
-                if ($mode -eq 'config') {
-                  # Reproduce the existing vulnerable ImagePath before repairing it.
-                  & sc.exe config $serviceName binPath= $binary
-                  if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the unquoted upgrade fixture' }
-                  if ((Get-ItemPropertyValue $registry -Name ImagePath) -cne $binary) {
-                    throw 'Upgrade fixture did not reproduce an unquoted ImagePath'
-                  }
-                }
-                @(
-                  '@echo off'
-                  'setlocal enabledelayedexpansion'
-                  "set SC_CMD=$mode"
-                  "set SERVICE_NAME=$serviceName"
-                  ('set "SERVICE_BIN=' + $binary + '"')
-                  'set SERVICE_START_TYPE=demand'
-                  $command[0]
-                ) | Set-Content -LiteralPath $script -Encoding Ascii
-                & $env:ComSpec /d /c $script
-                if ($LASTEXITCODE -ne 0) { throw "Service $mode command failed" }
-                $properties = Get-ItemProperty $registry
-                if ($properties.ImagePath -cne $expected) { throw "$mode did not persist a quoted ImagePath: $($properties.ImagePath)" }
-                if ($properties.Start -ne 3 -or $properties.DisplayName -cne 'Apollo Service' -or $properties.ObjectName -cne 'LocalSystem') {
-                  throw "$mode changed the service's start type, display name, or account"
-                }
-                $configuration = & sc.exe qc $serviceName
-                if ($LASTEXITCODE -ne 0 -or -not ($configuration -join "`n").Contains($expected)) {
-                  throw "$mode did not report a quoted BINARY_PATH_NAME"
-                }
-                Write-Host "$mode verified ImagePath: $($properties.ImagePath)"
-              }
-            } finally {
-              if (Test-Path $registry) {
-                & sc.exe delete $serviceName
-                if ($LASTEXITCODE -ne 0) { throw 'Temporary service cleanup failed' }
-              }
-              if (Test-Path $script) { Remove-Item -LiteralPath $script }
-            }
-          }
+          ./ci/test-service-path.ps1 -Installer $installer
 
       - name: Verify packaged virtual display driver
         shell: pwsh
@@ -337,9 +297,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Explicit beta.3 publication requested in the release-branch commit message.
+    # Explicit beta.4 publication requested in the release-branch commit message.
     # All existing validation/build/packaging gates remain mandatory via needs.
-    if: startsWith(github.ref, 'refs/tags/v0.4.7') || (github.event_name == 'workflow_dispatch' && inputs.publish_beta && github.ref == 'refs/heads/release/0.4.7') || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.4.7' && contains(github.event.head_commit.message, '[publish-beta.3]'))
+    if: startsWith(github.ref, 'refs/tags/v0.4.7') || (github.event_name == 'workflow_dispatch' && inputs.publish_beta && github.ref == 'refs/heads/release/0.4.7') || (github.event_name == 'push' && github.ref == 'refs/heads/release/0.4.7' && contains(github.event.head_commit.message, '[publish-beta.4]'))
     needs: build
     runs-on: ubuntu-latest
     permissions:

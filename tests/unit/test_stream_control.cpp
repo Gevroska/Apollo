@@ -14,3 +14,11 @@ TEST(StreamControlSecurity, ModernMediaReceivesKeepPayloadAndSenderTogether) {
 TEST(StreamControlSecurity, LegacyMediaReceivesKeepPayloadAndSenderTogether) {
   EXPECT_TRUE(stream::test::media_endpoint_isolation(true));
 }
+
+TEST(StreamControlSecurity, ShutdownDrainsPendingReceives) {
+  EXPECT_TRUE(stream::test::media_receive_shutdown(false));
+}
+
+TEST(StreamControlSecurity, ShutdownBeforeReceiverStartsStillDrainsReceives) {
+  EXPECT_TRUE(stream::test::media_receive_shutdown(true));
+}

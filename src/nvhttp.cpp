@@ -572,7 +572,10 @@ namespace nvhttp {
     crypto::cipher::ecb_t cipher(*sess.cipher_key, false);
 
     std::vector<uint8_t> decrypted;
-    cipher.decrypt(challenge, decrypted);
+    if (challenge.size() != 16 || cipher.decrypt(challenge, decrypted) != 0 || decrypted.size() != 16) {
+      fail_pair(sess, tree, "Invalid client challenge");
+      return;
+    }
 
     auto x509 = crypto::x509(conf_intern.servercert);
     auto sign = crypto::signature(x509);
@@ -616,7 +619,10 @@ namespace nvhttp {
     std::vector<uint8_t> decrypted;
     crypto::cipher::ecb_t cipher(*sess.cipher_key, false);
 
-    cipher.decrypt(encrypted_response, decrypted);
+    if (encrypted_response.size() != 32 || cipher.decrypt(encrypted_response, decrypted) != 0 || decrypted.size() != 32) {
+      fail_pair(sess, tree, "Invalid server challenge response");
+      return;
+    }
 
     sess.clienthash = std::move(decrypted);
 
@@ -816,6 +822,14 @@ namespace nvhttp {
         reject(400, "Invalid pairing fields");
         return;
       }
+      // Keep names valid for the persisted JSON state and the management API.
+      // Rendering replacement characters only in the approval list is too late.
+      try {
+        nlohmann::json(device_name).dump();
+      } catch (const nlohmann::json::type_error &) {
+        reject(400, "Invalid device name encoding");
+        return;
+      }
       if (!pairing_rate_allowed(source, now)) {
         reject(429, "Too many pairing attempts");
         return;
@@ -930,7 +944,8 @@ namespace nvhttp {
       if (value == args.end()) {
         return false;
       }
-      if (!pairing_hex(value->second, maximum)) {
+      if (!pairing_hex(value->second, maximum) ||
+          (std::string_view(name) != "clientpairingsecret" && value->second.size() != maximum)) {
         fail_pair(*sess, tree, "Invalid pairing payload");
       } else {
         callback(*sess, tree, util::from_hex_vec(value->second, true));

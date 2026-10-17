@@ -1,39 +1,22 @@
-## Apollo 0.4.7-beta.3 — targeted network security fixes
+# Apollo 0.4.7-beta.4
 
-- Keep sender endpoints separate for concurrent video/audio UDP receives and snapshot
-  the correct sender with each received packet.
-- Replace implicit oldest-request PIN approval with explicit, administrator-selected
-  requests identified by cryptographically random, single-use 256-bit server tokens.
-  Requests display their observed source IP and SHA-256 certificate fingerprint;
-  requester-provided device names are explicitly untrusted. Expired/replayed/missing
-  tokens fail closed and never approve another pending request.
-- The authenticated management API now requires `token` in `POST /api/pin`;
-  obtain pending approvals via authenticated `GET /api/pairing/requests` (no-store).
-  Update external management scripts using the old two-field PIN API.
-- Existing paired clients, GameStream/Moonlight wire protocol, OTP pairing, codecs,
-  dependency versions and pinned submodules are unchanged. The legacy four-digit PIN
-  exchange has not been redesigned; administrators must verify the selected request.
-- Regression coverage exercises real UDP receives, concurrent/replayed/expired approvals,
-  complete PIN/OTP handshakes and the Web UI's explicit selection behavior. Publication
-  remains gated on the Windows validation/build/installer pipeline. Hardware streaming
-  and interactive installation are not replaced by automated headless tests.
+This corrective prerelease reviews the complete beta.1, beta.2 and beta.3 changes against approved hotfix `8d789be463ef72cadb1ba16e202896b11ea7664b`.
 
----
+- Close idle and partially received RTSP connections when their launch expires or is cancelled, and cap outstanding handshake sockets at 64.
+- Retire RTSP launches without blocking the control thread, removing a three-thread cleanup/control/RTSP deadlock while preserving stream teardown serialization. Cancel UDP receives on their executor and drain their completions before releasing receive buffers or closing shared sockets.
+- Validate real RTSP SETUP targets and ANNOUNCE attributes, numeric conversion and unsafe stream parameters before allocating streaming resources. Keep integer and fractional frame-rate requests supported.
+- Reject incomplete pairing challenges and responses immediately, check cryptographic decryption results, and reject invalid UTF-8 device names before they can enter persistent client state.
+- Preserve literal exclamation marks in Windows installation and profile paths. CI now executes the complete packaged service script for creation and repair, with spaces, parentheses, ampersands, exclamation marks, percent signs and both LF/CRLF line endings.
+- Require the exact 51-test protocol/control inventory and reject skipped, disabled, incomplete or duplicate XML test results. Repeat all 51 checks five times; retain the immutable hotfix comparison and four regression sensitivity checks.
 
-Apollo 0.4.7 is based on the approved Windows hotfix source `8d789be4`, without the unrelated changes on master or changes to pinned submodules.
+The changes retain the earlier protections: authenticated encrypted RTSP for streaming launches/resumes; replay and retired-launch rejection; isolated audio/video receive endpoints; explicit administrator-selected PIN approvals bound to single-use server tokens; bounded pairing state and rate tracking; and quoted Windows service executable paths.
 
-Beta.2 additionally fixes the Windows unquoted service executable path (CVE-2025-54081 / GHSA-6p7j-5v8v-w45h). The installer persists literal quotes around ApolloService's executable path on both fresh installation and reconfiguration of an existing service. Existing delayed expansion keeps paths containing command metacharacters intact. Windows CI tests the packaged command with temporary services, confirms the registry ImagePath and service configuration, and verifies repair of an existing unquoted path. Dependencies and pinned submodules are unchanged.
+The authenticated management API requires `token` in `POST /api/pin`, obtained from authenticated `GET /api/pairing/requests`. Device names remain requester-supplied and unverified; administrators must verify the selected request's source and certificate fingerprint. Existing paired clients and complete PIN/OTP exchanges remain supported. Clients without encrypted RTSP support must be upgraded.
 
-This release requires authenticated encrypted RTSP for client streaming launches and resumes. Recent Artemis Android and Moonlight PC clients support this protocol. Legacy clients without encrypted RTSP must be upgraded. Invalid frames cannot alter the legitimate launch's encryption counters; replayed requests and sockets retained after expiry or cancellation cannot start another session.
+Direct dependency declarations and pinned submodule revisions remain unchanged. Beta.4 reuses beta.3's published, checksum-verified npm lock. The Windows toolchain package manifest is recorded for this build; stable v0.4.7 must match beta.4's manifest and npm lock.
 
-Pairing now has a global limit of 32 pending attempts, four per source, a bounded rate limiter, strict field bounds, and a 180-second absolute lifetime with periodic cleanup. Invalid OTP requests retain no pending state. PIN and OTP handshakes remain supported.
+Publication requires 262 executed candidate tests: 231 passes and the same 31 explicitly recorded mDNS/display expectation failures reproduced by the 202-test immutable hotfix baseline. The nine repaired pairing helper fixtures run only on the candidate; malformed inputs now fail at the correct earlier phase. The 51 protocol/control checks include real RTSP handlers, complete pairing exchanges, concurrency, socket expiry/capacity and UDP cancellation. Separate Web UI and release-gate tests also run. No new failure or skipped test is permitted.
 
-Windows validation gates run real loopback protocol handlers, repeated security regressions, existing headless unit tests, and four sensitivity checks against the original vulnerable handlers. The distribution build is separate and contains neither the test harness nor coverage instrumentation. The installer is checked for version 0.4.7 and the original hash-pinned SudoVDA driver files.
+Windows CI builds the distribution separately without test instrumentation, packages the NSIS installer, verifies its service script, numeric/product version and original hash-pinned SudoVDA driver files, and publishes SHA-256 checksums plus build/dependency metadata.
 
-The beta is a prerelease for the owner's validation with Artemis Android and Moonlight Windows/Fedora. Audio/video smoothness, hardware encoding, virtual-display operation and input must still be tried on the owner's devices before promotion to v0.4.7. This installer is unsigned. SHA256SUMS.txt identifies the installer and the stripped executable extracted from it. Build commit, submodule revisions and dependency manifests are included.
-
-Stable v0.4.7 publication additionally requires the Windows dependency manifest to match v0.4.7-beta.2 and reuses that beta's verified npm lock. A changed toolchain requires a new beta and revalidation before publication.
-
-The inherited headless suite is also executed against the immutable hotfix. Publication requires all 31 new tests to pass and no new failure among the existing tests. The 31 existing failures in the old mDNS/display expectations are recorded explicitly and must reproduce on both versions; their production source files must remain unchanged. XML reports and the comparison summary are retained.
-
-All 211 existing tests run on the patched candidate; 202 unchanged tests also run on the old source. The nine existing pairing helper fixtures run only on the candidate because the old helper erases an absent map iterator and crashes when these standalone fixtures complete. The new real HTTP pairing tests additionally verify complete PIN and OTP exchanges through production handlers.
+This installer is unsigned and remains a prerelease for validation with Artemis Android and Moonlight Windows/Fedora. Installation, actual service startup, audio/video smoothness, hardware encoding, virtual displays and input still require checks on the owner's devices before stable promotion. Automated headless results do not establish hardware streaming acceptance.

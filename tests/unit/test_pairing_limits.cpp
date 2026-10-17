@@ -324,3 +324,41 @@ TEST_F(PairingHttp, DisabledPairingRejectsExistingApprovalTokens) {
   ASSERT_TRUE(nvhttp::pin("5338", "", token));
   read(request);
 }
+
+TEST_F(PairingHttp, ShortAndOversizedChallengesFailBeforeAdvancing) {
+  for (const auto size : {2, 30, 34}) {
+    const auto id = "challenge" + std::to_string(size);
+    auto request = begin(query(id)); wait_pending(1);
+    ASSERT_TRUE(approve_single("5338", "")); read(request);
+    const auto result = xml(read(begin("uniqueid=" + id + "&clientchallenge=" + std::string(size, '0'))));
+    EXPECT_EQ(result.get<int>("root.<xmlattr>.status_code"), 400);
+    EXPECT_EQ(result.get<int>("root.paired"), 0);
+    EXPECT_EQ(nvhttp::test::pending(), 0);
+  }
+}
+
+TEST_F(PairingHttp, ShortAndOversizedChallengeResponsesFailBeforeAdvancing) {
+  for (const auto size : {2, 32, 62, 66}) {
+    const auto id = "response" + std::to_string(size);
+    auto request = begin(query(id)); wait_pending(1);
+    ASSERT_TRUE(approve_single("5338", "")); read(request);
+    const auto challenge = xml(read(begin("uniqueid=" + id + "&clientchallenge=" + std::string(32, '0'))));
+    ASSERT_EQ(challenge.get<int>("root.paired"), 1);
+    const auto result = xml(read(begin("uniqueid=" + id + "&serverchallengeresp=" + std::string(size, '0'))));
+    EXPECT_EQ(result.get<int>("root.<xmlattr>.status_code"), 400);
+    EXPECT_EQ(result.get<int>("root.paired"), 0);
+    EXPECT_EQ(nvhttp::test::pending(), 0);
+  }
+}
+
+TEST_F(PairingHttp, InvalidUtf8NameCannotPoisonPersistedClientState) {
+  auto invalid = query("invalid-name");
+  const auto position = invalid.find("devicename=invalid-name");
+  invalid.replace(position, std::string("devicename=invalid-name").size(), "devicename=%FF");
+  EXPECT_NE(read(begin(invalid)).find("status_code=\"400\""), std::string::npos);
+  EXPECT_EQ(nvhttp::test::pending(), 0);
+  auto valid = begin(query("valid-after-invalid")); wait_pending(1);
+  ASSERT_TRUE(approve_single("5338", "")); read(valid);
+  EXPECT_TRUE(finish_pair("valid-after-invalid", "5338"));
+  EXPECT_NO_THROW(nvhttp::get_all_clients().dump());
+}

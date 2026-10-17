@@ -12,6 +12,8 @@ extern "C" {
 // standard includes
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <limits>
 #include <set>
 #include <mutex>
 #include <unordered_map>
@@ -387,6 +389,11 @@ namespace rtsp_stream {
       handle_data_fn(sock, *session, std::move(req), authenticated_sequence);
     }
 
+    void close() {
+      boost::system::error_code ec;
+      sock.close(ec);
+    }
+
     std::function<void(tcp::socket &sock, launch_session_t &, msg_t &&, std::optional<uint32_t>)> handle_data_fn;
 
     tcp::socket sock;
@@ -436,7 +443,8 @@ namespace rtsp_stream {
     }
 
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req, std::optional<uint32_t> sequence) {
-      // Hold the lease through dispatch: clear/expiry cannot revoke it mid-command.
+      // Serialize dispatch and response counters. Retirement prevents subsequent
+      // commands; a command already admitted here may finish its response.
       std::lock_guard<std::recursive_mutex> lock {launch_mutex};
       auto pending = current_launch();
       if (!pending || pending.get() != &session || !session.rtsp_cipher || !sequence ||
@@ -482,9 +490,11 @@ namespace rtsp_stream {
 
       std::lock_guard<std::recursive_mutex> lock {launch_mutex};
       auto launch_session = current_launch();
-      if (launch_session && launch_session->rtsp_cipher) {
+      std::erase_if(pending_sockets, [](const auto &socket) { return socket.expired(); });
+      if (launch_session && launch_session->rtsp_cipher && pending_sockets.size() < MAX_PENDING_SOCKETS) {
         // Associate the current RTSP session with this socket and start reading
         socket->session = launch_session;
+        pending_sockets.emplace_back(socket);
         socket->read();
       } else {
         // This can happen due to normal things like port scanning, so let's not make these visible by default
@@ -517,7 +527,7 @@ namespace rtsp_stream {
     void session_raise(std::shared_ptr<launch_session_t> launch_session) {
       std::lock_guard<std::recursive_mutex> lock {launch_mutex};
       // Plaintext cannot prove possession of the authenticated launch key.
-      if (!launch_session->rtsp_cipher || current_launch()) {
+      if (!launch_session->rtsp_cipher || launch_session->rtsp_retired.load() || current_launch()) {
         return;
       }
       launch_deadline = std::chrono::steady_clock::now() + config::stream.ping_timeout;
@@ -525,21 +535,38 @@ namespace rtsp_stream {
     }
 
     void session_clear(uint32_t launch_session_id) {
-      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
       auto pending = launch_event.view(0s);
       if (pending && pending->id == launch_session_id) {
-        launch_event.pop(0s);
+        // The control thread must never wait for launch_mutex: an ANNOUNCE can
+        // hold it while waiting for session slots whose cleanup joins control.
+        // Revoke immediately, then serialize socket cleanup on the RTSP executor.
+        pending->rtsp_retired.store(true);
+        asio::post(io_context, [this] {
+          std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+          current_launch();
+        });
       }
     }
 
     std::shared_ptr<launch_session_t> current_launch() {
       // Callers hold launch_mutex, including every final command dispatch.
       auto pending = launch_event.view(0s);
-      if (pending && std::chrono::steady_clock::now() >= launch_deadline) {
+      if (pending && (pending->rtsp_retired.load() || std::chrono::steady_clock::now() >= launch_deadline)) {
         launch_event.pop(0s);
+        close_launch_sockets(pending);
         return nullptr;
       }
       return pending;
+    }
+
+    void close_launch_sockets(const std::shared_ptr<launch_session_t> &launch) {
+      // A launch can be revoked by HTTP/control threads. Close sockets on their
+      // executor so pending reads finish before their buffers are released.
+      for (const auto &weak : pending_sockets) {
+        if (auto socket = weak.lock(); socket && socket->session == launch) {
+          asio::post(io_context, [socket] { socket->close(); });
+        }
+      }
     }
 
     /**
@@ -561,17 +588,29 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
+      std::lock_guard<std::mutex> cleanup_lock {cleanup_mutex};
+      if (all) {
+        // /cancel and shutdown must also revoke launches that have not reached
+        // ANNOUNCE yet, including sockets already accepted for those launches.
+        std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+        if (auto pending = launch_event.pop(0s)) close_launch_sockets(pending);
+      }
+      // Preserve session counts and serialize new stream insertion until old
+      // workers and shared capture/broadcast state have finished retiring.
       auto lg = _session_slots.lock();
-
       for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-
+        if (all || stream::session::state(**i) == stream::session::state_e::STOPPING) {
+#ifdef SUNSHINE_TESTS
+          if (test_retire_session) test_retire_session();
+          else
+#endif
+          {
+            stream::session::stop(**i);
+            stream::session::join(**i);
+          }
           i = _session_slots->erase(i);
         } else {
-          i++;
+          ++i;
         }
       }
     }
@@ -589,10 +628,17 @@ namespace rtsp_stream {
      * @brief Inserts the provided session into the set of sessions.
      * @param session The session to insert.
      */
-    void insert(const std::shared_ptr<stream::session_t> &session) {
+    bool insert(const std::shared_ptr<stream::session_t> &session, const launch_session_t *launch = nullptr) {
       auto lg = _session_slots.lock();
+      // ANNOUNCE holds launch_mutex but may have waited here for old workers to
+      // retire. Control retirement is deliberately nonblocking, so revalidate
+      // its atomic revocation and the lease deadline after that wait.
+      if (launch && (launch->rtsp_retired.load() || std::chrono::steady_clock::now() >= launch_deadline)) {
+        return false;
+      }
       _session_slots->emplace(session);
       BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+      return true;
     }
 
     /**
@@ -645,6 +691,19 @@ namespace rtsp_stream {
     void test_pump() { io_context.run_for(25ms); }
 #endif // Security regression harness methods
 
+#ifdef SUNSHINE_TESTS
+    std::function<void()> test_retire_session;
+    void test_with_launch_lock(const std::function<void()> &work) {
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      work();
+    }
+    void test_expire_launch() {
+      std::lock_guard<std::recursive_mutex> lock {launch_mutex};
+      launch_deadline = std::chrono::steady_clock::now();
+      current_launch();
+    }
+#endif
+
   private:
     std::unordered_map<std::string_view, cmd_func_t> _map_cmd_cb;
 
@@ -654,6 +713,9 @@ namespace rtsp_stream {
     tcp::acceptor acceptor {io_context};
     std::recursive_mutex launch_mutex;
     std::chrono::steady_clock::time_point launch_deadline;
+    std::mutex cleanup_mutex;
+    static constexpr std::size_t MAX_PENDING_SOCKETS = 64;
+    std::vector<std::weak_ptr<socket_t>> pending_sockets;
 
     std::shared_ptr<socket_t> next_socket;
   };
@@ -891,9 +953,13 @@ namespace rtsp_stream {
     seqn.content = const_cast<char *>(seqn_str.c_str());
 
     std::string_view target {req->message.request.target};
-    auto begin = std::find(std::begin(target), std::end(target), '=') + 1;
-    auto end = std::find(begin, std::end(target), '/');
-    std::string_view type {begin, (size_t) std::distance(begin, end)};
+    const auto separator = target.find('=');
+    if (separator == std::string_view::npos || separator + 1 == target.size()) {
+      respond(sock, session, nullptr, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+    auto type = target.substr(separator + 1);
+    type = type.substr(0, type.find('/'));
 
     std::uint16_t port;
     if (type == "audio"sv) {
@@ -966,6 +1032,9 @@ namespace rtsp_stream {
           begin = pos;
         }
       }
+      if (begin != pos) {
+        lines.emplace_back(begin, pos - begin);
+      }
     }
 
     std::string_view client;
@@ -977,14 +1046,23 @@ namespace rtsp_stream {
         client = line.substr(2);
       } else if (type == "a=") {
         auto pos = line.find(':');
-
+        if (pos == std::string_view::npos && line.size() > 2) {
+          // SDP property attributes have no value and do not configure a stream.
+          continue;
+        }
+        if (pos == std::string_view::npos || pos <= 2 || pos + 1 == line.size()) {
+          respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+          return;
+        }
         auto name = line.substr(2, pos - 2);
         auto val = line.substr(pos + 1);
-
-        if (val[val.size() - 1] == ' ') {
-          val = val.substr(0, val.size() - 1);
+        while (!val.empty() && val.back() == ' ') {
+          val.remove_suffix(1);
         }
-        args.emplace(name, val);
+        if (val.empty() || !args.emplace(name, val).second) {
+          respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+          return;
+        }
       }
     }
 
@@ -1008,38 +1086,62 @@ namespace rtsp_stream {
 
     std::int64_t configuredBitrateKbps;
     config.audio.flags[audio::config_t::HOST_AUDIO] = session.host_audio;
+    const auto number = [&](std::string_view name) {
+      const auto text = args.at(name);
+      int value {};
+      const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+      if (parsed.ec != std::errc {} || parsed.ptr != text.data() + text.size() || value < 0) {
+        throw std::out_of_range("Invalid numeric SDP attribute");
+      }
+      return value;
+    };
     try {
-      config.audio.channels = util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
-      config.audio.mask = util::from_view(args.at("x-nv-audio.surround.channelMask"sv));
-      config.audio.packetDuration = util::from_view(args.at("x-nv-aqos.packetDuration"sv));
+      config.audio.channels = number("x-nv-audio.surround.numChannels"sv);
+      config.audio.mask = number("x-nv-audio.surround.channelMask"sv);
+      config.audio.packetDuration = number("x-nv-aqos.packetDuration"sv);
 
       config.audio.flags[audio::config_t::HIGH_QUALITY] =
-        util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
+        number("x-nv-audio.surround.AudioQuality"sv);
 
-      config.controlProtocolType = util::from_view(args.at("x-nv-general.useReliableUdp"sv));
-      config.packetsize = util::from_view(args.at("x-nv-video[0].packetSize"sv));
-      config.minRequiredFecPackets = util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
-      config.mlFeatureFlags = util::from_view(args.at("x-ml-general.featureFlags"sv));
-      config.audioQosType = util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
-      config.videoQosType = util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
-      config.encryptionFlagsEnabled = util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
+      config.controlProtocolType = number("x-nv-general.useReliableUdp"sv);
+      config.packetsize = number("x-nv-video[0].packetSize"sv);
+      config.minRequiredFecPackets = number("x-nv-vqos[0].fec.minRequiredFecPackets"sv);
+      config.mlFeatureFlags = number("x-ml-general.featureFlags"sv);
+      config.audioQosType = number("x-nv-aqos.qosTrafficType"sv);
+      config.videoQosType = number("x-nv-vqos[0].qosTrafficType"sv);
+      config.encryptionFlagsEnabled = number("x-ss-general.encryptionEnabled"sv);
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
-      if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {
+      if (number("x-nv-general.featureFlags"sv) & 0x20) {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
       }
 
-      config.monitor.height = util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
-      config.monitor.width = util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
-      config.monitor.framerate = util::from_view(args.at("x-nv-video[0].maxFPS"sv));
-      config.monitor.bitrate = util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
-      config.monitor.slicesPerFrame = util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
-      config.monitor.numRefFrames = util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
-      config.monitor.encoderCscMode = util::from_view(args.at("x-nv-video[0].encoderCscMode"sv));
-      config.monitor.videoFormat = util::from_view(args.at("x-nv-vqos[0].bitStreamFormat"sv));
-      config.monitor.dynamicRange = util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
-      config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
-      config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+      config.monitor.height = number("x-nv-video[0].clientViewportHt"sv);
+      config.monitor.width = number("x-nv-video[0].clientViewportWd"sv);
+      config.monitor.framerate = number("x-nv-video[0].maxFPS"sv);
+      config.monitor.bitrate = number("x-nv-vqos[0].bw.maximumBitrateKbps"sv);
+      config.monitor.slicesPerFrame = number("x-nv-video[0].videoEncoderSlicesPerFrame"sv);
+      config.monitor.numRefFrames = number("x-nv-video[0].maxNumReferenceFrames"sv);
+      config.monitor.encoderCscMode = number("x-nv-video[0].encoderCscMode"sv);
+      config.monitor.videoFormat = number("x-nv-vqos[0].bitStreamFormat"sv);
+      config.monitor.dynamicRange = number("x-nv-video[0].dynamicRangeMode"sv);
+      config.monitor.chromaSamplingType = number("x-ss-video[0].chromaSamplingType"sv);
+      config.monitor.enableIntraRefresh = number("x-ss-video[0].intraRefresh"sv);
+
+      // Validate values before arithmetic, indexing or allocating stream state.
+      // In particular packetSize == sizeof(NV_VIDEO_PACKET) is a modulo by zero
+      // in the video sender, and a zero launch FPS breaks warp-factor conversion.
+      if ((config.audio.channels != 2 && config.audio.channels != 6 && config.audio.channels != 8) ||
+          config.audio.packetDuration < 1 || config.audio.packetDuration > 60 ||
+          config.packetsize <= static_cast<int>(sizeof(NV_VIDEO_PACKET)) ||
+          config.packetsize > static_cast<int>(65507 - MAX_RTP_HEADER_SIZE - sizeof(ENC_VIDEO_HEADER)) ||
+          config.minRequiredFecPackets > 255 || config.monitor.width < 1 || config.monitor.height < 1 ||
+          config.monitor.framerate < 1 || config.monitor.framerate > std::numeric_limits<int>::max() / 1000 ||
+          session.fps < 1 || config.monitor.bitrate < 1 || config.monitor.slicesPerFrame < 1 ||
+          config.monitor.numRefFrames > 16 || config.monitor.videoFormat > 2 ||
+          config.monitor.dynamicRange > 1 || config.monitor.chromaSamplingType > 1) {
+        throw std::out_of_range("Unsafe stream configuration");
+      }
 
       if (config::video.limit_framerate) {
         config.monitor.encodingFramerate = session.fps;
@@ -1059,7 +1161,7 @@ namespace rtsp_stream {
 
       config.monitor.input_only = session.input_only;
 
-      configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+      configuredBitrateKbps = number("x-ml-video.configuredBitrateKbps"sv);
 
       if (!configuredBitrateKbps) {
         configuredBitrateKbps = config.monitor.bitrate;
@@ -1080,6 +1182,9 @@ namespace rtsp_stream {
       if (config::video.limit_framerate && warp_factor >= 2) {
         configuredBitrateKbps *= warp_factor;
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
+      }
+      if (configuredBitrateKbps > std::numeric_limits<int>::max()) {
+        throw std::out_of_range("Stream bitrate exceeds the encoder range");
       }
 
     } catch (std::out_of_range &) {
@@ -1180,7 +1285,10 @@ namespace rtsp_stream {
     }
 
     auto stream_session = stream::session::alloc(config, session);
-    server->insert(stream_session);
+    if (!server->insert(stream_session, &session)) {
+      respond(sock, session, &option, 409, "Conflict", req->sequenceNumber, {});
+      return;
+    }
 
     if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
@@ -1295,10 +1403,18 @@ namespace rtsp_stream {
 #ifdef SUNSHINE_TESTS // Security regression harness
 namespace rtsp_stream::test {
   result exchange(std::shared_ptr<launch_session_t> session, const std::vector<std::string> &messages,
-                  retirement retire) {
+                  retirement retire, bool production_handlers) {
     result output {};
     rtsp_server_t test_server;
     for (auto command : {"OPTIONS", "DESCRIBE", "SETUP", "ANNOUNCE", "PLAY"}) {
+      if (production_handlers) {
+        const std::unordered_map<std::string_view, cmd_func_t> callbacks {
+          {"OPTIONS", cmd_option}, {"DESCRIBE", cmd_describe}, {"SETUP", cmd_setup},
+          {"ANNOUNCE", cmd_announce}, {"PLAY", cmd_play}
+        };
+        test_server.map(command, callbacks.at(command));
+        continue;
+      }
       test_server.map(command, [&output, command](auto *, auto &socket, auto &launch, auto &&req) {
         output.commands.emplace_back(command);
         if (std::string_view(command) == "ANNOUNCE") {
@@ -1322,6 +1438,8 @@ namespace rtsp_stream::test {
       test_server.test_pump(); // Accept and retain the launch before revocation.
       if (retire == retirement::clear || retire == retirement::replace) {
         test_server.session_clear(session->id);
+      } else if (retire == retirement::terminate) {
+        test_server.clear();
       } else if (retire == retirement::wrong_id) {
         test_server.session_clear(session->id + 1);
       } else if (retire == retirement::expire) {
@@ -1353,3 +1471,104 @@ namespace rtsp_stream::test {
   }
 }
 #endif // Security regression harness
+
+#ifdef SUNSHINE_TESTS // Beta.4 regression harness
+namespace rtsp_stream::test {
+  static auto socket_test_launch() {
+    auto launch = std::make_shared<launch_session_t>();
+    launch->id = 42;
+    launch->gcm_key = crypto::aes_t(16, 0x22);
+    launch->rtsp_cipher.emplace(launch->gcm_key, false);
+    return launch;
+  }
+
+  static bool peer_closed(tcp::socket &socket) {
+    socket.non_blocking(true);
+    char byte;
+    boost::system::error_code ec;
+    socket.read_some(asio::buffer(&byte, 1), ec);
+    return ec == asio::error::eof || ec == asio::error::connection_reset;
+  }
+
+  bool stalled_sockets_close(bool expire, bool partial_header) {
+    rtsp_server_t test_server;
+    boost::system::error_code ec;
+    if (test_server.bind(net::IPV4, 0, ec)) throw boost::system::system_error(ec);
+    auto launch = socket_test_launch();
+    test_server.session_raise(launch);
+    asio::io_context client_io;
+    tcp::socket client(client_io);
+    client.connect({asio::ip::address_v4::loopback(), test_server.test_port()});
+    if (partial_header) asio::write(client, asio::buffer("\x80", 1));
+    test_server.test_pump();
+    if (expire) test_server.test_expire_launch();
+    else test_server.session_clear(launch->id);
+    test_server.test_pump();
+    return peer_closed(client);
+  }
+
+  bool socket_capacity_recovers() {
+    rtsp_server_t test_server;
+    boost::system::error_code ec;
+    if (test_server.bind(net::IPV4, 0, ec)) throw boost::system::system_error(ec);
+    auto launch = socket_test_launch();
+    test_server.session_raise(launch);
+    asio::io_context client_io;
+    std::vector<tcp::socket> clients;
+    for (int i = 0; i < 65; ++i) {
+      clients.emplace_back(client_io);
+      clients.back().connect({asio::ip::address_v4::loopback(), test_server.test_port()});
+    }
+    bool overflow_closed = false;
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!overflow_closed && std::chrono::steady_clock::now() < deadline) {
+      test_server.test_pump();
+      overflow_closed = peer_closed(clients.back());
+    }
+    if (!overflow_closed || peer_closed(clients.front())) return false;
+    clients.front().close();
+    test_server.test_pump();
+    tcp::socket replacement(client_io);
+    replacement.connect({asio::ip::address_v4::loopback(), test_server.test_port()});
+    test_server.test_pump();
+    return !peer_closed(replacement);
+  }
+
+  bool control_retirement_does_not_block_cleanup() {
+    rtsp_server_t test_server;
+    const auto launch = socket_test_launch();
+    test_server.session_raise(launch);
+    test_server.insert(nullptr);
+    std::atomic_bool launch_locked {false}, control_started {false}, control_finished {false}, inserted {true};
+    std::thread rtsp_worker, control_worker;
+    bool released = false;
+    test_server.test_retire_session = [&] {
+      test_server.session_raise(launch);
+      // Recreate cleanup -> control -> launch -> session-slots dependencies.
+      rtsp_worker = std::thread([&] {
+        test_server.test_with_launch_lock([&] {
+          launch_locked.store(true);
+          while (!control_started.load()) std::this_thread::sleep_for(1ms);
+          inserted.store(test_server.insert(nullptr, launch.get()));
+        });
+      });
+      control_worker = std::thread([&] {
+        while (!launch_locked.load()) std::this_thread::sleep_for(1ms);
+        control_started.store(true);
+        test_server.session_clear(launch->id);
+        control_finished.store(true);
+      });
+      const auto deadline = std::chrono::steady_clock::now() + 1s;
+      while (!control_finished.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
+      released = control_finished.load() && launch->rtsp_retired.load();
+    };
+    test_server.clear();
+    rtsp_worker.join();
+    control_worker.join();
+    // A failed insertion check can leave the dummy slot behind. Keep teardown
+    // safe without invoking a callback whose captured locals are being destroyed.
+    test_server.test_retire_session = [] {};
+    return released && !inserted.load() && test_server.session_count() == 0;
+  }
+}
+#endif // Beta.4 regression harness

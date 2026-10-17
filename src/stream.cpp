@@ -1295,6 +1295,9 @@ namespace stream {
 
     auto recv_func_init = [&](udp::socket &sock, int buf_elem, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
       recv_func[buf_elem] = [&, buf_elem](const boost::system::error_code &ec, size_t bytes) {
+        if (ec == asio::error::operation_aborted && broadcast_shutdown_event->peek()) {
+          return;
+        }
         // Snapshot the sender paired with this buffer before rearming this lane.
         const auto peer = peers[buf_elem];
         auto fg = util::fail_guard([&]() {
@@ -1344,11 +1347,18 @@ namespace stream {
     video_sock.async_receive_from(asio::buffer(buf[0]), peers[0], 0, recv_func[0]);
     audio_sock.async_receive_from(asio::buffer(buf[1]), peers[1], 0, recv_func[1]);
 
-    while (!broadcast_shutdown_event->peek()) {
-      io.run();
-    }
+    // Drain cancellation completions even if shutdown preceded thread startup.
+    // The two receives still own these stack buffers and endpoint objects.
+    io.run();
   }
 
+  void stop_receiving(broadcast_ctx_t &ctx) {
+    asio::post(ctx.io_context, [&ctx] {
+      boost::system::error_code ignored;
+      ctx.video_sock.cancel(ignored);
+      ctx.audio_sock.cancel(ignored);
+    });
+  }
 
 #ifdef SUNSHINE_TESTS
   namespace test {
@@ -1391,14 +1401,8 @@ namespace stream {
         catch (...) { receiver_error = std::current_exception(); }
       });
       auto stop = [&] {
-        // Close on the receiver thread and drain cancellation completions before
-        // destroying the receive buffers/endpoints. Do not stop io prematurely.
-        asio::post(ctx.io_context, [&] {
-          shutdown->raise(true);
-          boost::system::error_code ignored;
-          ctx.video_sock.close(ignored);
-          ctx.audio_sock.close(ignored);
-        });
+        shutdown->raise(true);
+        stop_receiving(ctx);
         worker.join();
         shutdown->reset();
       };
@@ -1414,6 +1418,38 @@ namespace stream {
       }
       stop();
       return matched && !receiver_error;
+    }
+
+    bool media_receive_shutdown(bool before_start) {
+      auto shutdown = mail::man->event<bool>(mail::broadcast_shutdown);
+      shutdown->reset();
+      broadcast_ctx_t ctx;
+      ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>();
+      ctx.video_sock.open(udp::v4());
+      ctx.audio_sock.open(udp::v4());
+      ctx.video_sock.bind({asio::ip::address_v4::loopback(), 0});
+      ctx.audio_sock.bind({asio::ip::address_v4::loopback(), 0});
+      std::promise<void> ready;
+      auto ready_future = ready.get_future();
+      if (!before_start) asio::post(ctx.io_context, [&] { ready.set_value(); });
+      if (before_start) {
+        shutdown->raise(true);
+        stop_receiving(ctx);
+      }
+      std::thread worker([&] { recvThread(ctx); });
+      bool initialized = true;
+      if (!before_start) {
+        initialized = ready_future.wait_for(2s) == std::future_status::ready;
+        shutdown->raise(true);
+        stop_receiving(ctx);
+      }
+      worker.join();
+      const bool drained = ctx.io_context.stopped();
+      // No callback may outlive recvThread's local receive state.
+      ctx.io_context.restart();
+      const auto remaining = ctx.io_context.poll();
+      shutdown->reset();
+      return initialized && drained && remaining == 0;
     }
   }
 #endif
@@ -1919,10 +1955,7 @@ namespace stream {
     audio_packets->stop();
 
     ctx.message_queue_queue->stop();
-    ctx.io_context.stop();
-
-    ctx.video_sock.close();
-    ctx.audio_sock.close();
+    stop_receiving(ctx);
 
     video_packets.reset();
     audio_packets.reset();
@@ -1935,6 +1968,9 @@ namespace stream {
     ctx.audio_thread.join();
     BOOST_LOG(debug) << "Waiting for main control thread to end..."sv;
     ctx.control_thread.join();
+    // No asynchronous receives or native send calls still use these sockets.
+    ctx.video_sock.close();
+    ctx.audio_sock.close();
     BOOST_LOG(debug) << "All broadcasting threads ended"sv;
 
     broadcast_shutdown_event->reset();

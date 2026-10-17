@@ -8,30 +8,32 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 def cases(path):
     tests = ET.parse(path).getroot().findall(".//testcase")
-    return {t.attrib["classname"] + "." + t.attrib["name"]: t for t in tests}
+    result = {}
+    for test in tests:
+        name = test.attrib["classname"] + "." + test.attrib["name"]
+        if name in result:
+            raise RuntimeError(f"Duplicate test result: {name}")
+        if test.find("skipped") is not None or test.get("status") != "run" or test.get("result") != "completed":
+            raise RuntimeError(f"Test did not execute completely: {name}")
+        result[name] = test
+    return result
 def failed(tests):
     return {name for name, test in tests.items() if test.find("failure") is not None or test.find("error") is not None}
 def compare(candidate_path, baseline_path):
     known = json.loads((ROOT / "ci/hotfix-known-regressions.json").read_text())
+    required = json.loads((ROOT / "ci/protocol-regressions.json").read_text())
+    if len(required) != len(set(required)):
+        raise RuntimeError("Duplicate required protocol test")
     candidate, baseline = cases(candidate_path), cases(baseline_path)
     subprocess.run(["git", "diff", "--exit-code", known["base"], "HEAD", "--", *known["unchanged_sources"]], cwd=ROOT, check=True)
-    # beta.3 adds two media-endpoint and five token-approval tests to beta.2.
-    # Keep the immutable 202-test baseline and all nine pairing fixtures intact.
-    if len(baseline) != 202 or len(candidate) != 249:
-        raise RuntimeError(f"Unexpected headless test inventory: {len(baseline)} baseline tests (expected 202), {len(candidate)} candidate tests (expected 249)")
+    # Keep every baseline test and pairing fixture, plus the exact reviewed
+    # protocol inventory. Equal totals alone cannot detect substituted tests.
+    expected_candidate = 202 + 9 + len(required)
+    if len(baseline) != 202 or len(candidate) != expected_candidate:
+        raise RuntimeError(f"Unexpected headless test inventory: {len(baseline)} baseline tests (expected 202), {len(candidate)} candidate tests (expected {expected_candidate})")
     additions = {name for name in candidate if name.startswith(("RtspSecurity.", "PairingHttp.", "LaunchProtocol.", "StreamControlSecurity."))}
-    beta3_regressions = {
-        "StreamControlSecurity.ModernMediaReceivesKeepPayloadAndSenderTogether",
-        "StreamControlSecurity.LegacyMediaReceivesKeepPayloadAndSenderTogether",
-        "PairingHttp.ApprovalTargetsSelectedRequestNotOldest",
-        "PairingHttp.MissingUnknownAndClientSuppliedTokensCannotApprove",
-        "PairingHttp.ExpiredTokenCannotApproveReusedClientId",
-        "PairingHttp.OlderAttackerRequestsDoNotReceiveLegitimateApproval",
-        "PairingHttp.ConcurrentApprovalConsumesTokenExactlyOnce",
-        "PairingHttp.DisabledPairingRejectsExistingApprovalTokens",
-    }
-    if len(additions) != 38 or not beta3_regressions.issubset(additions) or any(candidate[name].find("skipped") is not None for name in additions):
-        raise RuntimeError("Every new protocol/control regression, including all beta.3 security checks, must execute")
+    if additions != set(required):
+        raise RuntimeError("The complete reviewed protocol/control inventory must execute")
     repaired_fixtures = {name for name in candidate if name.startswith("PairingTest.") or "/PairingTest." in name}
     if len(repaired_fixtures) != 9 or any(candidate[name].find("skipped") is not None for name in repaired_fixtures):
         raise RuntimeError("All nine existing pairing helper tests must execute")
