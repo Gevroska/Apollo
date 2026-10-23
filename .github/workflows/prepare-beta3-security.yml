@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           cp ci/prepare-beta3-security.py "$RUNNER_TEMP/prepare-beta3-security.py"
-          git checkout --detach a8f6a3cf4b5638342964e28658f22c835aa2282c
+          git checkout --detach d9371e13077e0c91a6ecae1e418b56a7cfdae260
           python "$RUNNER_TEMP/prepare-beta3-security.py"
           node --test tests/web/pairing-approval.test.mjs
           git diff --check
