@@ -136,7 +136,7 @@ jobs:
           if [[ "$BUILD_VERSION" == "0.4.7" ]]; then
             beta="https://github.com/$GITHUB_REPOSITORY/releases/download/v0.4.7-beta.4"
             curl --fail --location --silent --show-error "$beta/windows-packages.txt" -o beta-packages.txt
-            diff -u beta-packages.txt windows-packages.txt
+            git diff --no-index -- beta-packages.txt windows-packages.txt
           else
             # This corrective beta keeps beta.3's resolved JavaScript graph.
             # MSYS2 toolchain changes are recorded in the new package manifest.
