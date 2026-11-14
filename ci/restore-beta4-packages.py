@@ -56,7 +56,7 @@ def restore():
         def download(item):
             name, version = item
             # Epochs are recorded by pacman but omitted from archive filenames.
-            archive_version = re.split(r"[:~]", version, maxsplit=1)[-1]
+            archive_version = version.split(":", maxsplit=1)[-1]
             repository = "mingw/ucrt64" if name.startswith("mingw-w64-ucrt-x86_64-") else "msys/x86_64"
             architectures = ("any",) if repository == "mingw/ucrt64" else ("x86_64", "any")
             for architecture in architectures:
